@@ -1,0 +1,37 @@
+[project]
+name = "locor"
+version = "0.0.1"
+authors = [
+  { name="Joel Honkamaa" },
+]
+description = "Tool for mono- or multimodal image registration based on learned local logarithmic corralation ratio."
+readme = "description.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "torch>=2.0",
+    "nibabel",
+    "numpy",
+    "matplotlib",
+    "tqdm",
+]
+keywords=[
+    "multimodal image registration",
+    "deformation",
+    "coordinate mapping",
+    "pytorch"
+]
+license = {file = "LICENSE"}
+
+[project.urls]
+"Homepage" = "https://github.com/honkamj/locor"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"image_registration_tool" = ["py.typed"]

@@ -1,0 +1,23 @@
+name: locor
+channels:
+  - defaults
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.10
+  - pytorch::pytorch-cuda=11.8
+  - pytorch::torchvision
+  - pytorch::torchaudio
+  - pytorch::pytorch=2.5
+  - ipykernel
+  - matplotlib
+  - mypy
+  - pip
+  - numpy
+  - pylint
+  - isort
+  - twine
+  - tqdm
+  - pip:
+    - nibabel
+    - git+https://github.com/honkamj/composable-mapping@d7e28b68017f359840fdb77850e0dc5a9ddd9431
