@@ -16,7 +16,6 @@ dependencies = [
     "torch>=2.0",
     "nibabel",
     "numpy",
-    "matplotlib",
     "tqdm",
 ]
 keywords=[
