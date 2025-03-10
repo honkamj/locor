@@ -1,6 +1,6 @@
 # Locor
 
-Locor is a generic multimodal image registration tool based on modaling local functional dependence with learned basis functions.
+Locor is a generic multimodal image registration tool based on modaling local functional dependence with linear combination of learned basis functions.
 
 ## Installation
 
