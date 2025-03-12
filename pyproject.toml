@@ -15,6 +15,7 @@ classifiers = [
 dependencies = [
     "torch>=2.0",
     "nibabel",
+    "composable-mapping",
     "tqdm",
 ]
 keywords=[

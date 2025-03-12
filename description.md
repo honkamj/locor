@@ -7,7 +7,6 @@ Locor is a generic multimodal image registration tool based on modaling local fu
 Install using pip by running the commands
 
     pip install git+https://github.com/honkamj/locor
-    pip install git+https://github.com/honkamj/composable-mapping@d7e28b68017f359840fdb77850e0dc5a9ddd9431
 
 ## Usage
 
