@@ -9,15 +9,16 @@ from composable_mapping import (
     CoordinateSystem,
     CubicSplineSampler,
     DataFormat,
-    EnumeratedSamplingParameterCache,
     GridComposableMapping,
     LimitDirection,
     LinearInterpolator,
     OriginalFOV,
     OriginalShape,
     SamplableVolume,
-    no_sampling_parameter_cache,
+    clear_sampling_cache,
+    no_sampling_cache,
     samplable_volume,
+    sampling_cache,
     stack_mappable_tensors,
 )
 from composable_mapping.util import combine_optional_masks
@@ -211,10 +212,9 @@ def _register_affine(
     normalizing_affine, inverse_normalizing_affine = _normalizing_affine(
         moving.coordinate_system.cast(device=device)
     )
-    sampling_parameter_cache = EnumeratedSamplingParameterCache()
     progress_bar = tqdm(range(parameters.n_iterations), position=rank)
     for _ in progress_bar:
-        with sampling_parameter_cache:
+        with sampling_cache():
             optimizer.zero_grad()
             for feature_optimizer in feature_optimizers:
                 feature_optimizer.zero_grad()
@@ -246,7 +246,7 @@ def _register_affine(
                     reference_image_parameters,
                 )
                 # We disable the cache since the similarity sampler differs per iteration.
-                with no_sampling_parameter_cache():
+                with no_sampling_cache():
                     similarity_loss = local_least_squares_error(
                         samplable_volume(
                             features_moving,
@@ -266,6 +266,7 @@ def _register_affine(
             for feature_optimizer in feature_optimizers:
                 feature_optimizer.step()
             progress_bar.set_description(f"Loss{process_rank_postfix}: {loss.item():.4e}")
+    clear_sampling_cache()
     return [
         initial_deformation.set_affine(
             affine_parameters=affine_parameters.transformation_parameters.data,
@@ -349,10 +350,9 @@ def _register_dense(
         parameters=parameters,
         device=device,
     )
-    sampling_parameter_cache = EnumeratedSamplingParameterCache()
     progress_bar = tqdm(range(parameters.n_iterations), position=rank)
     for _ in progress_bar:
-        with sampling_parameter_cache:
+        with sampling_cache():
             optimizer.zero_grad()
             for feature_optimizer in feature_optimizers:
                 feature_optimizer.zero_grad()
@@ -398,7 +398,7 @@ def _register_dense(
                     reference_image_parameters,
                 )
                 # We disable the cache since the similarity sampler differs per iteration.
-                with no_sampling_parameter_cache():
+                with no_sampling_cache():
                     similarity = local_least_squares_error(
                         samplable_volume(
                             features_moving,
@@ -445,6 +445,7 @@ def _register_dense(
     ).resample_to(
         deformation_coordinates,
     )
+    clear_sampling_cache()
     return [
         initial_deformation.update(
             update_svf=final_update_svf,
@@ -601,8 +602,6 @@ def _similarity_sampler(
             (2 * rand(1, device=torch_device("cpu"), dtype=float32).item() - 1) / 2 * int(stride)
             for stride in parameters.similarity_sliding_window_stride
         ],
-        extrapolation_mode="zeros",
-        mask_extrapolated_regions=False,
     )
 
 
@@ -617,7 +616,6 @@ def _smoothed_mapping(
     smoothing_sampler = GaussianSampler(
         truncate_at=[truncate_at_n_stds * std for std in smoothing_stds],
         std=smoothing_stds.tolist(),
-        mask_extrapolated_regions=False,
     )
     sampled_image = image.sample()
     values, mask = sampled_image.generate(generate_missing_mask=False, cast_mask=False)
@@ -648,6 +646,7 @@ def _smoothed_mapping(
         smoothed_values,
         coordinate_system=image.coordinate_system,
         mask=mask,
+        sampler=LinearInterpolator(limit_direction=LimitDirection.average()),
     )
     coordinates = image.coordinate_system.reformat(
         reference=Center(),
@@ -656,9 +655,7 @@ def _smoothed_mapping(
     derivatives = stack_mappable_tensors(
         *(
             smoothed_image.modify_sampler(
-                sampler=LinearInterpolator().derivative(
-                    spatial_dim=spatial_dim, limit_direction=LimitDirection.average()
-                )
+                sampler=LinearInterpolator().derivative(spatial_dim=spatial_dim)
             ).sample_to(coordinates)
             for spatial_dim in range(len(smoothing_stds))
         ),
