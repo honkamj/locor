@@ -48,8 +48,9 @@ class BendingEnergy:
                     deformation,
                     spatial_dim=spatial_dim,
                     target=derivation_coordinates,
-                    limit_direction=limit_direction,
-                    sampler=LinearInterpolator(mask_extrapolated_regions=False),
+                    sampler=LinearInterpolator(
+                        mask_extrapolated_regions=False, limit_direction=limit_direction
+                    ),
                 )
                 for spatial_dim in range(len(deformation.coordinate_system.spatial_shape))
             ),
@@ -72,8 +73,10 @@ class BendingEnergy:
                 samplable_volume(
                     derivative,
                     coordinate_system=jacobian_coordinates,
-                    sampler=LinearInterpolator().derivative(
-                        spatial_dim=derived_dim, limit_direction=limit_direction
+                    sampler=LinearInterpolator(
+                        limit_direction=limit_direction, mask_extrapolated_regions=False
+                    ).derivative(
+                        spatial_dim=derived_dim,
                     ),
                 ).sample_to(derivation_coordinates)
                 / mappable(derivation_coordinates.grid_spacing()[..., None, derived_dim])

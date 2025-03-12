@@ -13,11 +13,11 @@ dependencies:
   - matplotlib
   - mypy
   - pip
-  - numpy
   - pylint
   - isort
+  - black
   - twine
   - tqdm
   - pip:
     - nibabel
-    - git+https://github.com/honkamj/composable-mapping@d7e28b68017f359840fdb77850e0dc5a9ddd9431
+    - git+https://github.com/honkamj/composable-mapping@dev
