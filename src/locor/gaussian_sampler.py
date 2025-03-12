@@ -1,26 +1,58 @@
 """Gaussian smoothing sampler."""
 
-from typing import Sequence, Tuple, Union
+from typing import Sequence, Union
 
-from composable_mapping import BaseSeparableSampler, LimitDirection
-from composable_mapping.sampler.base import ISeparableKernelSupport
-from torch import Tensor, exp
-
-
-class GaussianKernelSupport(ISeparableKernelSupport):
-    """Kernel support for Gaussian smoothing."""
-
-    def __init__(self, truncate_at: float) -> None:
-        self.truncate_at = truncate_at
-
-    def __call__(self, limit_direction: LimitDirection) -> Tuple[float, float, bool, bool]:
-        return -self.truncate_at, self.truncate_at, True, True
-
-    def derivative(self) -> "GaussianKernelSupport":
-        return self
+from composable_mapping import (
+    LimitDirection,
+    PiecewiseKernelDefinition,
+    SeparableSampler,
+)
+from torch import Tensor
+from torch import bool as torch_bool
+from torch import device as torch_device
+from torch import dtype as torch_dtype
+from torch import exp, linspace, zeros
 
 
-class GaussianSampler(BaseSeparableSampler):
+class GaussianKernel(PiecewiseKernelDefinition):
+    """Gaussian kernel."""
+
+    def __init__(
+        self,
+        truncate_at: Sequence[int | float],
+        mean: Sequence[int | float] | None = None,
+        std: Sequence[int | float] | None = None,
+    ) -> None:
+        self._truncate_at = truncate_at
+        self._mean = mean
+        self._std = std
+
+    def is_interpolating_kernel(self, spatial_dim: int) -> bool:
+        return False
+
+    def edge_continuity_schedule(self, spatial_dim: int, device: torch_device) -> Tensor:
+        return zeros(  # Due to truncating, the kernel is not continuous at the edges
+            (1, 3), device=device, dtype=torch_bool
+        )
+
+    def piece_edges(self, spatial_dim: int, dtype: torch_dtype, device: torch_device) -> Tensor:
+        return linspace(
+            -self._truncate_at[spatial_dim],
+            self._truncate_at[spatial_dim],
+            2,
+            dtype=dtype,
+            device=device,
+        )
+
+    def evaluate(self, spatial_dim: int, coordinates: Tensor) -> Tensor:
+        std: Union[Tensor, float] = 1.0 if self._std is None else self._std[spatial_dim]
+        mean: Union[Tensor, float] = 0.0 if self._mean is None else self._mean[spatial_dim]
+        values = exp(-((coordinates - mean) ** 2) / (2 * std**2))
+        values = values / values.sum()
+        return values
+
+
+class GaussianSampler(SeparableSampler):
     """Interpolation with gaussian kernel."""
 
     def __init__(
@@ -28,50 +60,13 @@ class GaussianSampler(BaseSeparableSampler):
         truncate_at: Sequence[int | float],
         mean: Sequence[int | float] | None = None,
         std: Sequence[int | float] | None = None,
-        extrapolation_mode: str = "zeros",
-        mask_extrapolated_regions: bool = False,
-        convolution_threshold: float = 1e-3,
-        mask_threshold: float = 1e-5,
     ) -> None:
         self._mean = mean
         self._std = std
         self._truncate_at = truncate_at
         super().__init__(
-            extrapolation_mode=extrapolation_mode,
-            convolution_threshold=convolution_threshold,
-            mask_extrapolated_regions=mask_extrapolated_regions,
-            mask_threshold=mask_threshold,
-            limit_direction=LimitDirection.left(),
+            kernel=GaussianKernel(truncate_at=truncate_at, mean=mean, std=std),
+            extrapolation_mode="zeros",
+            mask_extrapolated_regions=False,
+            limit_direction=LimitDirection.average(),
         )
-
-    def _kernel_support(self, spatial_dim: int) -> GaussianKernelSupport:
-        return GaussianKernelSupport(
-            truncate_at=self._truncate_at[spatial_dim],
-        )
-
-    def _is_interpolating_kernel(self, spatial_dim: int) -> bool:
-        return False
-
-    def _left_limit_kernel(self, coordinates: Tensor, spatial_dim: int) -> Tensor:
-        return self._right_limit_kernel(coordinates, spatial_dim)
-
-    def _right_limit_kernel(self, coordinates: Tensor, spatial_dim: int) -> Tensor:
-        std: Union[Tensor, float] = 1.0 if self._std is None else self._std[spatial_dim]
-        mean: Union[Tensor, float] = 0.0 if self._mean is None else self._mean[spatial_dim]
-        values = exp(-((coordinates - mean) ** 2) / (2 * std**2))
-        values = values / values.sum()
-        return values
-
-    def sample_values(
-        self,
-        volume: Tensor,
-        coordinates: Tensor,
-    ) -> Tensor:
-        raise NotImplementedError
-
-    def sample_mask(
-        self,
-        mask: Tensor,
-        coordinates: Tensor,
-    ) -> Tensor:
-        raise NotImplementedError

@@ -1,0 +1,27 @@
+{
+    "jupyter.notebookFileRoot": "${workspaceFolder}/src",
+    "python.analysis.autoImportCompletions": true,
+    "editor.detectIndentation": false,
+    "editor.tabSize": 4,
+    "python.envFile": "${workspaceFolder}/.env",
+    "pylint.importStrategy": "fromEnvironment",
+    "pylint.args": [
+        "--rcfile=${workspaceFolder}/.pylintrc"
+    ],
+    "mypy-type-checker.importStrategy": "fromEnvironment",
+    "isort.args": [
+        "--profile", "black"
+    ],
+    "isort.importStrategy": "fromEnvironment",
+    "black-formatter.importStrategy": "fromEnvironment",
+    "black-formatter.args":  ["--line-length", "100"],
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+        },
+    },
+    "pylint.cwd": "${workspaceFolder}/src",
+    "mypy-type-checker.cwd": "${workspaceFolder}/src"
+}

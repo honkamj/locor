@@ -4,7 +4,7 @@ version = "0.0.1"
 authors = [
   { name="Joel Honkamaa" },
 ]
-description = "Tool for mono- or multimodal image registration based on learned local logarithmic corralation ratio."
+description = "Tool for generic multimodal image registration based on modaling local functional dependence with linear combination of learned basis functions."
 readme = "description.md"
 requires-python = ">=3.10"
 classifiers = [
@@ -15,7 +15,6 @@ classifiers = [
 dependencies = [
     "torch>=2.0",
     "nibabel",
-    "numpy",
     "tqdm",
 ]
 keywords=[
