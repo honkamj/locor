@@ -1,9 +1,14 @@
 """Registration functions"""
 
-from os import environ
+from multiprocessing import Pool, set_start_method
 from typing import Any, Sequence
 
-from composable_mapping import (
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import numpy as np
+import optax
+from jaxmorph import (
     Affine,
     Center,
     CoordinateSystem,
@@ -15,23 +20,10 @@ from composable_mapping import (
     OriginalFOV,
     OriginalShape,
     SamplableVolume,
-    clear_sampling_cache,
-    no_sampling_cache,
     samplable_volume,
-    sampling_cache,
     stack_mappable_tensors,
 )
-from composable_mapping.util import combine_optional_masks
-from torch import Tensor, cat
-from torch import device as torch_device
-from torch import dtype as torch_dtype
-from torch import float32, rand, stack, tensor
-from torch.cuda import set_device as set_cuda_device
-from torch.distributed import init_process_group
-from torch.multiprocessing import Pool, set_start_method
-from torch.nn import Module
-from torch.nn.parallel import DistributedDataParallel
-from torch.optim import Adam
+from jaxmorph.util import combine_optional_masks
 from tqdm import tqdm  # type: ignore
 
 from .bounding_box import optimal_coordinates
@@ -45,22 +37,23 @@ from .feature_extractor import FeatureExtractor
 from .gaussian_sampler import GaussianSampler
 from .local_least_squares_error import local_least_squares_error
 from .symmetric_deformation_model import SymmetricDeformationModel
-from .transformation_modules import AffineTransformationParameters, SplineParameters
+from .transformation_parameters import (
+    initialize_affine_transformation_parameters,
+    initialize_spline_parameters,
+)
 
 
 def register(
     reference: GridComposableMapping,
     moving: GridComposableMapping,
     parameters: RegistrationParameters,
-    devices: Sequence[torch_device] | None = None,
+    devices: Sequence[jax.Device],
 ) -> tuple[GridComposableMapping, GridComposableMapping]:
     """Register the images and return the coordinate mappings in both directions.
 
     Coordinate mapping is returned in both directions but the non-affine
     component is learned in the coordinates of the reference image.
     """
-    if devices is None or not devices:
-        devices = [reference.device]
     if len(devices) == 1:
         return tuple(_register(None, reference, moving, parameters, device=devices[0]))
     if len(devices) == 2:
@@ -85,123 +78,137 @@ def _register(
     reference: GridComposableMapping,
     moving: GridComposableMapping,
     parameters: RegistrationParameters,
-    device: torch_device,
+    device: jax.Device,
 ) -> Any:
-    if device.type == "cuda":
-        set_cuda_device(device)
-    if rank is not None:
-        environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        environ.setdefault("MASTER_PORT", "29500")
-        init_process_group(backend="gloo", rank=rank, world_size=2)
-        process_rank_postfix = f" (process {rank})"
-    else:
-        process_rank_postfix = ""
+    with jax.default_device(device):
+        if rank is not None:
+            jax.distributed.initialize()
+            process_rank_postfix = f" (process {rank})"
+        else:
+            process_rank_postfix = ""
 
-    reference = _normalize(reference)
-    moving = _normalize(moving)
+        reference = _normalize(reference)
+        moving = _normalize(moving)
 
-    n_reference_channels = reference.sample().channels_shape[0]
-    n_moving_channels = moving.sample().channels_shape[0]
+        n_reference_channels = reference.sample().channels_shape[0]
+        n_moving_channels = moving.sample().channels_shape[0]
 
-    n_dims = len(reference.coordinate_system.spatial_shape)
+        n_dims = len(reference.coordinate_system.spatial_shape)
 
-    feature_extractors: list[FeatureExtractor] = []
-    deformations: list[SymmetricDeformationModel] = []
-    full_deformation_references: list[CoordinateSystem] = []
-    if rank in (0, None):
-        feature_extractors.append(
-            FeatureExtractor(
-                n_dims=n_dims,
-                n_input_channels=2 * n_reference_channels,
-                n_hidden_features=(
-                    parameters.feature_extraction_parameters_reference.n_hidden_features
-                ),
-                n_output_channels=parameters.feature_extraction_parameters_moving.n_features,
-            ).to(device=device, dtype=reference.dtype)
-        )
-        deformations.append(SymmetricDeformationModel())
-        full_deformation_references.append(reference.coordinate_system.cast(device=device))
-    if rank in (1, None):
-        feature_extractors.append(
-            FeatureExtractor(
-                n_dims=n_dims,
-                n_input_channels=2 * n_moving_channels,
-                n_hidden_features=parameters.feature_extraction_parameters_moving.n_hidden_features,
-                n_output_channels=parameters.feature_extraction_parameters_moving.n_features,
-            ).to(device=device, dtype=moving.dtype)
-        )
-        deformations.append(SymmetricDeformationModel(inverse=True))
-        full_deformation_references.append(moving.coordinate_system.cast(device=device))
+        key = jax.random.PRNGKey(0)
+        key_1, key_2 = jax.random.split(key, num=2)
 
-    if parameters.affine_stage_parameters is not None:
-        print(f"Starting affine stage{process_rank_postfix}")
-        deformations = _register_affine(
-            initial_deformations=deformations,
-            feature_extractors=feature_extractors,
-            reference=reference,
-            moving=moving,
-            parameters=parameters.affine_stage_parameters,
-            device=device,
-            rank=rank,
-        )
+        feature_extractors: list[FeatureExtractor] = []
+        deformations: list[SymmetricDeformationModel] = []
+        full_deformation_references: list[CoordinateSystem] = []
+        if rank in (0, None):
+            key_1, feature_extractor_key_1 = jax.random.split(key_1)
+            feature_extractors.append(
+                FeatureExtractor(
+                    n_dims=n_dims,
+                    n_input_channels=2 * n_reference_channels,
+                    n_hidden_features=(
+                        parameters.feature_extraction_parameters_reference.n_hidden_features
+                    ),
+                    n_output_channels=parameters.feature_extraction_parameters_moving.n_features,
+                    key=feature_extractor_key_1,
+                )
+            )
+            deformations.append(SymmetricDeformationModel())
+            full_deformation_references.append(
+                reference.coordinate_system.device_put(device=device)
+            )
+        if rank in (1, None):
+            key_2, feature_extractor_key_2 = jax.random.split(key_2)
+            feature_extractors.append(
+                FeatureExtractor(
+                    n_dims=n_dims,
+                    n_input_channels=2 * n_moving_channels,
+                    n_hidden_features=parameters.feature_extraction_parameters_moving.n_hidden_features,
+                    n_output_channels=parameters.feature_extraction_parameters_moving.n_features,
+                    key=feature_extractor_key_2,
+                )
+            )
+            deformations.append(SymmetricDeformationModel(inverse=True))
+            full_deformation_references.append(moving.coordinate_system.device_put(device=device))
 
-    for index, dense_stage_parameters in enumerate(parameters.dense_stage_parameters):
-        print(f"Starting dense stage {index + 1}{process_rank_postfix}")
-        deformations = _register_dense(
-            initial_deformations=deformations,
-            feature_extractors=feature_extractors,
-            reference=reference,
-            moving=moving,
-            parameters=dense_stage_parameters,
-            device=device,
-            rank=rank,
-        )
+        if parameters.affine_stage_parameters is not None:
+            print(f"Starting affine stage{process_rank_postfix}")
+            subkey_1, key_1 = jax.random.split(key_1)
+            subkey_2, key_2 = jax.random.split(key_2)
+            deformations = _register_affine(
+                initial_deformations=deformations,
+                feature_extractors=feature_extractors,
+                keys=[subkey_1, subkey_2],
+                reference=reference,
+                moving=moving,
+                parameters=parameters.affine_stage_parameters,
+                device=device,
+                rank=rank,
+            )
 
-    output_deformations: list[GridComposableMapping] = []
-    deformation_coordinates = reference.coordinate_system.cast(device=device)
-    for deformation, full_deformation_reference in zip(deformations, full_deformation_references):
-        full_deformation, _ = deformation.build_full_deformation(deformation_coordinates)
-        output_deformations.append(full_deformation.assign_coordinates(full_deformation_reference))
+        for index, dense_stage_parameters in enumerate(parameters.dense_stage_parameters):
+            print(f"Starting dense stage {index + 1}{process_rank_postfix}")
+            deformations = _register_dense(
+                initial_deformations=deformations,
+                feature_extractors=feature_extractors,
+                reference=reference,
+                moving=moving,
+                parameters=dense_stage_parameters,
+                device=device,
+                rank=rank,
+            )
 
-    if rank is not None:
-        assert len(output_deformations) == 1
-        return output_deformations[0]
+        output_deformations: list[GridComposableMapping] = []
+        deformation_coordinates = reference.coordinate_system.device_put(device=device)
+        for deformation, full_deformation_reference in zip(
+            deformations, full_deformation_references
+        ):
+            full_deformation, _ = deformation.build_full_deformation(deformation_coordinates)
+            output_deformations.append(
+                full_deformation.assign_coordinates(full_deformation_reference)
+            )
 
-    return output_deformations
+        if rank is not None:
+            assert len(output_deformations) == 1
+            return output_deformations[0]
+
+        return output_deformations
 
 
 def _register_affine(
     initial_deformations: Sequence[SymmetricDeformationModel],
     feature_extractors: Sequence[FeatureExtractor],
+    keys: Sequence[jnp.ndarray],
     reference: GridComposableMapping,
     moving: GridComposableMapping,
     parameters: AffineStageParameters,
-    device: torch_device,
+    device: jax.Device,
     rank: int | None,
 ) -> list[SymmetricDeformationModel]:
-    affine_parameters = AffineTransformationParameters(
+    affine_parameters = initialize_affine_transformation_parameters(
         n_dims=len(reference.coordinate_system.spatial_shape),
         transformation_type=parameters.transformation_type,
     )
-    affine_parameters.to(device=device, dtype=reference.dtype)
     if rank is not None:
-        affine_parameters_distributed: Module = DistributedDataParallel(affine_parameters)
         process_rank_postfix = f" (process {rank})"
     else:
-        affine_parameters_distributed = affine_parameters
         process_rank_postfix = ""
-    optimizer = Adam(
-        affine_parameters.parameters(),
-        lr=parameters.transformation_learning_rate,
+    optimizer = optax.adam(
+        learning_rate=parameters.transformation_learning_rate,
     )
-    feature_optimizers: list[Adam] = []
+    optimizer_state = optimizer.init(affine_parameters)
+    feature_optimizers: list[optax.GradientTransformation] = []
+    feature_optimizer_states: list[optax.OptState] = []
     for feature_extractor in feature_extractors:
-        feature_optimizers.append(
-            Adam(
-                feature_extractor.parameters(),
-                lr=parameters.feature_learning_rate,
-            )
+        feature_optimizer = optax.adam(
+            learning_rate=parameters.feature_learning_rate,
         )
+        feature_optimizers.append(feature_optimizer)
+        feature_optimizer_states.append(
+            feature_optimizer.init(eqx.filter(feature_extractor, eqx.is_array))
+        )
+
     registration_inputs = _initialize_registration_stage(
         initial_deformations=initial_deformations,
         reference=reference,
@@ -210,66 +217,101 @@ def _register_affine(
         device=device,
     )
     normalizing_affine, inverse_normalizing_affine = _normalizing_affine(
-        moving.coordinate_system.cast(device=device)
+        moving.coordinate_system.device_put(device=device)
     )
     progress_bar = tqdm(range(parameters.n_iterations), position=rank)
+
+    def loss(
+        affine_parameters: jnp.ndarray,
+        feature_extractors: Sequence[FeatureExtractor],
+        keys: Sequence[jnp.ndarray],
+    ) -> jnp.ndarray:
+        similarity_losses = []
+        for (
+            (reference_initialized, moving_initialized, similarity_coordinates),
+            feature_extractor,
+            initial_deformation,
+            key,
+        ) in zip(registration_inputs, feature_extractors, initial_deformations, keys):
+            reference_image_parameters = (
+                parameters.reference_image_parameters,
+                parameters.moving_image_parameters,
+            )[initial_deformation.inverse]
+            updated_deformation = initial_deformation.set_affine(
+                affine_parameters=affine_parameters,
+                affine_transformation_type=parameters.transformation_type,
+                normalizing_affine=normalizing_affine,
+                normalizing_affine_inverse=inverse_normalizing_affine,
+            )
+            registered_moving = (moving_initialized @ updated_deformation.affine).resample_to(
+                reference_initialized
+            )
+            registered_moving_values, registered_moving_mask = registered_moving.sample().generate()
+            features_moving = feature_extractor(registered_moving_values)
+            similarity_sampler = _similarity_sampler(
+                reference_initialized,
+                reference_image_parameters,
+                key=key,
+            )
+            similarity_loss = local_least_squares_error(
+                samplable_volume(
+                    features_moving,
+                    mask=registered_moving_mask,
+                    coordinate_system=reference_initialized.coordinate_system,
+                ),
+                reference_initialized,
+                sampler=similarity_sampler,
+                coordinates=similarity_coordinates,
+                regularization=reference_image_parameters.matrix_solve_epsilon,
+                eps=reference_image_parameters.similarity_logarithm_epsilon,
+            ).mean()
+            similarity_losses.append(similarity_loss)
+        loss = jnp.stack(similarity_losses).mean()
+        return loss
+
+    @jax.jit
+    def step(
+        affine_parameters: jnp.ndarray,
+        feature_extractors: Sequence[FeatureExtractor],
+        optimizer_state: optax.OptState,
+        feature_optimizer_states: Sequence[optax.OptState],
+        keys: Sequence[jnp.ndarray],
+    ) -> tuple[
+        jnp.ndarray,
+        jnp.ndarray,
+        optax.GradientTransformation,
+        Sequence[optax.GradientTransformation],
+    ]:
+        feature_extractors = list(feature_extractors)
+        feature_optimizer_states = list(feature_optimizer_states)
+        loss_value, grads = jax.value_and_grad(loss, argnums=(0, 1))(
+            affine_parameters, feature_extractors, keys
+        )
+        updates, optimizer_state = optimizer.update(grads[0], optimizer_state)
+        affine_parameters = optax.apply_updates(affine_parameters, updates)
+        for i, feature_optimizer in enumerate(feature_optimizers):
+            updates, feature_optimizer_states[i] = feature_optimizer.update(
+                grads[1][i], feature_optimizer_states[i]
+            )
+            feature_extractors[i] = optax.apply_updates(feature_extractors[i], updates)
+        return loss_value, affine_parameters, optimizer_state, feature_optimizer_states
+
+    key_1, key_2 = keys
     for _ in progress_bar:
-        with sampling_cache():
-            optimizer.zero_grad()
-            for feature_optimizer in feature_optimizers:
-                feature_optimizer.zero_grad()
-            similarity_losses = []
-            for (
-                (reference_initialized, moving_initialized, similarity_coordinates),
-                feature_extractor,
-                initial_deformation,
-            ) in zip(registration_inputs, feature_extractors, initial_deformations):
-                reference_image_parameters = (
-                    parameters.reference_image_parameters,
-                    parameters.moving_image_parameters,
-                )[initial_deformation.inverse]
-                updated_deformation = initial_deformation.set_affine(
-                    affine_parameters=affine_parameters_distributed(),
-                    affine_transformation_type=parameters.transformation_type,
-                    normalizing_affine=normalizing_affine,
-                    normalizing_affine_inverse=inverse_normalizing_affine,
-                )
-                registered_moving = (moving_initialized @ updated_deformation.affine).resample_to(
-                    reference_initialized
-                )
-                registered_moving_values, registered_moving_mask = (
-                    registered_moving.sample().generate()
-                )
-                features_moving = feature_extractor(registered_moving_values)
-                similarity_sampler = _similarity_sampler(
-                    reference_initialized,
-                    reference_image_parameters,
-                )
-                # We disable the cache since the similarity sampler differs per iteration.
-                with no_sampling_cache():
-                    similarity_loss = local_least_squares_error(
-                        samplable_volume(
-                            features_moving,
-                            mask=registered_moving_mask,
-                            coordinate_system=reference_initialized.coordinate_system,
-                        ),
-                        reference_initialized,
-                        sampler=similarity_sampler,
-                        coordinates=similarity_coordinates,
-                        regularization=reference_image_parameters.matrix_solve_epsilon,
-                        eps=reference_image_parameters.similarity_logarithm_epsilon,
-                    ).mean()
-                similarity_losses.append(similarity_loss)
-            loss = stack(similarity_losses).mean()
-            loss.backward()
-            optimizer.step()
-            for feature_optimizer in feature_optimizers:
-                feature_optimizer.step()
-            progress_bar.set_description(f"Loss{process_rank_postfix}: {loss.item():.4e}")
-    clear_sampling_cache()
+        subkey_1, key_1 = jax.random.split(key_1)
+        subkey_2, key_2 = jax.random.split(key_2)
+        print("Taking first step!")
+        loss_value, affine_parameters, optimizer_state, feature_optimizer_states = step(
+            affine_parameters,
+            feature_extractors,
+            optimizer_state,
+            feature_optimizer_states,
+            [subkey_1, subkey_2],
+        )
+        progress_bar.set_description(f"Loss{process_rank_postfix}: {float(loss_value):.4e}")
     return [
         initial_deformation.set_affine(
-            affine_parameters=affine_parameters.transformation_parameters.data,
+            affine_parameters=affine_parameters,
             affine_transformation_type=parameters.transformation_type,
             normalizing_affine=normalizing_affine,
             normalizing_affine_inverse=inverse_normalizing_affine,
@@ -281,9 +323,8 @@ def _register_affine(
 def _normalizing_affine(coordinates: CoordinateSystem) -> tuple[Affine, Affine]:
     centered_normalized_coordinates = CoordinateSystem.centered_normalized(
         spatial_shape=coordinates.spatial_shape,
-        voxel_size=coordinates.grid_spacing_cpu(),
+        voxel_size=coordinates.grid_spacing(),
         dtype=coordinates.dtype,
-        device=coordinates.device,
     )
     forward = Affine.from_matrix(
         (
@@ -306,7 +347,7 @@ def _register_dense(
     reference: GridComposableMapping,
     moving: GridComposableMapping,
     parameters: DenseStageParameters,
-    device: torch_device,
+    device: jax.Device,
     rank: int | None,
 ) -> list[SymmetricDeformationModel]:
     deformation_coordinates = reference.coordinate_system.cast(device=device)
@@ -460,7 +501,7 @@ def _initialize_registration_stage(
     reference: GridComposableMapping,
     moving: GridComposableMapping,
     parameters: AffineStageParameters | DenseStageParameters,
-    device: torch_device,
+    device: jax.Device,
 ) -> Sequence[tuple[GridComposableMapping, GridComposableMapping, CoordinateSystem]]:
     registration_inputs: list[
         tuple[GridComposableMapping, GridComposableMapping, CoordinateSystem]
@@ -495,20 +536,24 @@ def _initialize_image_pair(
     reference_parameters: ImageParameters,
     initial_deformation: SymmetricDeformationModel,
     deformation_coordinates: CoordinateSystem,
-    device: torch_device,
+    device: jax.Device,
 ) -> tuple[GridComposableMapping, GridComposableMapping]:
-    reference = reference.cast(device=device)
-    moving = moving.cast(device=device)
-    deformation_coordinates = deformation_coordinates.cast(device=device)
+    reference = reference.device_put(device=device)
+    moving = moving.device_put(device=device)
+    deformation_coordinates = deformation_coordinates.device_put(device=device)
 
     reference_smoothed = _smoothed_mapping(
         reference,
-        sampling_spacing=_tensor(reference_parameters.image_sampling_spacing, reference.dtype),
+        sampling_spacing=jnp.asarray(
+            reference_parameters.image_sampling_spacing, dtype=reference.dtype
+        ),
         truncate_at_n_stds=reference_parameters.truncate_image_smoothing_at_n_stds,
     )
     moving_smoothed = _smoothed_mapping(
         moving,
-        sampling_spacing=_tensor(reference_parameters.image_sampling_spacing, reference.dtype),
+        sampling_spacing=jnp.asarray(
+            reference_parameters.image_sampling_spacing, dtype=reference.dtype
+        ),
         truncate_at_n_stds=reference_parameters.truncate_image_smoothing_at_n_stds,
     )
 
@@ -560,11 +605,11 @@ def _similarity_sampling_coordinates(
     sampled_reference: GridComposableMapping,
     parameters: ImageParameters,
 ) -> CoordinateSystem:
-    grid_spacing_cpu = sampled_reference.coordinate_system.grid_spacing_cpu()
+    grid_spacing = sampled_reference.coordinate_system.grid_spacing()
     stds = (
-        _tensor(parameters.similarity_sliding_window_std, sampled_reference.dtype)
-        / grid_spacing_cpu
-    ).tolist()
+        np.asarray(parameters.similarity_sliding_window_std, dtype=sampled_reference.dtype)
+        / grid_spacing
+    )
     similarity_sampling_coordinates = sampled_reference.coordinate_system.reformat(
         downsampling_factor=parameters.similarity_sliding_window_stride,
         reference=Center(),
@@ -583,12 +628,15 @@ def _similarity_sampling_coordinates(
 def _similarity_sampler(
     sampled_reference: GridComposableMapping,
     parameters: ImageParameters,
+    key: jnp.ndarray,
 ) -> GaussianSampler:
-    grid_spacing_cpu = sampled_reference.coordinate_system.grid_spacing_cpu()
+    grid_spacing = sampled_reference.coordinate_system.grid_spacing()
+    n_dims = len(parameters.similarity_sliding_window_stride)
     stds = (
-        _tensor(parameters.similarity_sliding_window_std, sampled_reference.dtype)
-        / grid_spacing_cpu
+        np.asarray(parameters.similarity_sliding_window_std, sampled_reference.dtype) / grid_spacing
     )
+    strides = jnp.asarray(parameters.similarity_sliding_window_stride)
+    means = (2 * jax.random.uniform(key=key, shape=(n_dims,), dtype=stds.dtype) - 1) * strides / 2
     return GaussianSampler(
         truncate_at=[
             stride / 2 + parameters.truncate_sliding_window_at_n_stds * std
@@ -597,25 +645,22 @@ def _similarity_sampler(
                 parameters.similarity_sliding_window_stride,
             )
         ],
-        std=stds.tolist(),
-        mean=[
-            (2 * rand(1, device=torch_device("cpu"), dtype=float32).item() - 1) / 2 * int(stride)
-            for stride in parameters.similarity_sliding_window_stride
-        ],
+        std=jnp.asarray(stds),
+        mean=means,
     )
 
 
 def _smoothed_mapping(
     image: GridComposableMapping,
-    sampling_spacing: Tensor,
+    sampling_spacing: jnp.ndarray,
     truncate_at_n_stds: int | float,
 ) -> GridComposableMapping:
-    voxel_size = image.coordinate_system.grid_spacing_cpu()
+    voxel_size = image.coordinate_system.grid_spacing()
     smoothing_stds = 2.0 * sampling_spacing / voxel_size / 6.0
-    smoothing_stds[sampling_spacing / voxel_size <= 1.0 + 1e-3] = 1e-6
+    smoothing_stds = smoothing_stds.at[sampling_spacing / voxel_size <= 1.0 + 1e-3].set(1e-6)
     smoothing_sampler = GaussianSampler(
         truncate_at=[truncate_at_n_stds * std for std in smoothing_stds],
-        std=smoothing_stds.tolist(),
+        std=jnp.asarray(smoothing_stds),
     )
     sampled_image = image.sample()
     values, mask = sampled_image.generate(generate_missing_mask=False, cast_mask=False)
@@ -633,7 +678,7 @@ def _smoothed_mapping(
     if mask is not None:
         smoothed_mask = (
             samplable_volume(
-                mask.to(image.dtype),
+                mask.astype(image.dtype),
                 coordinate_system=image.coordinate_system,
                 sampler=smoothing_sampler,
             )
@@ -661,10 +706,10 @@ def _smoothed_mapping(
         ),
         channel_index=0,
     )
-    derivative_magnitude = derivatives.generate_values().square().sum(dim=1).sqrt()
+    derivative_magnitude = jnp.sqrt(jnp.sum(derivatives.generate_values() ** 2, axis=1))
     smoothed_values, smoothed_mask = smoothed_image.sample_to(coordinates).generate()
     joint_mapping = samplable_volume(
-        cat([smoothed_values, derivative_magnitude], dim=1),
+        jnp.concatenate([smoothed_values, derivative_magnitude], axis=1),
         coordinate_system=coordinates,
         mask=combine_optional_masks(
             smoothed_mask,
@@ -678,20 +723,14 @@ def _normalize(
     image: GridComposableMapping,
 ) -> SamplableVolume:
     values, mask = image.sample().generate(generate_missing_mask=True, cast_mask=False)
-    assert values.size(0) == 1
-    valid_voxels = values[0][mask[0].broadcast_to(values.shape[1:])]
-    image_min = valid_voxels.amin()
-    image_max = valid_voxels.amax()
-    values = values.clamp(min=image_min, max=image_max)
+    assert values.shape[0] == 1
+    valid_voxels = values[0][jnp.broadcast_to(mask[0], values.shape[1:])]
+    image_min = jnp.amin(valid_voxels)
+    image_max = jnp.amax(valid_voxels)
+    values = jnp.clip(values, min=image_min, max=image_max)
     values = (values - image_min) / (image_max - image_min)
     return samplable_volume(
         values,
         mask=mask,
         coordinate_system=image.coordinate_system,
     )
-
-
-def _tensor(item: Tensor | Sequence[float | int], dtype: torch_dtype) -> Tensor:
-    if isinstance(item, Tensor):
-        return item
-    return tensor(item, device=torch_device("cpu"), dtype=dtype)

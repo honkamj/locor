@@ -5,6 +5,8 @@ include a function with name `build_config` that is then called to dynamically
 build the configuration parameters based on the inputs.
 """
 
+import numpy as np
+
 from locor.affine_transformation import AffineTransformationTypeDefinition
 from locor.config_parameters import (
     AffineStageParameters,
@@ -24,13 +26,13 @@ def build_config(arguments: ConfigBuildingArguments) -> RegistrationParameters:
     n_dims = len(arguments.reference.coordinate_system.spatial_shape)
     similarity_sliding_window_stride = [3] * n_dims
 
-    reference_voxel_spacing = arguments.reference.coordinate_system.grid_spacing_cpu()
-    moving_voxel_spacing = arguments.moving.coordinate_system.grid_spacing_cpu()
+    reference_voxel_spacing = arguments.reference.coordinate_system.grid_spacing()
+    moving_voxel_spacing = arguments.moving.coordinate_system.grid_spacing()
 
     # Regularization base weight is scaled by the square of the image sampling
     # grid spacing for each stage to account for the larger voxel size causing
     # reduced relative bending energy weight.
-    min_voxel_spacing_reference = reference_voxel_spacing.amin().item()
+    min_voxel_spacing_reference = float(np.amin(reference_voxel_spacing))
 
     regularization_base_weight = 5.0e2
     regularization_loss = BendingEnergy()

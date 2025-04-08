@@ -2,14 +2,12 @@
 
 from typing import Iterable, Sequence
 
-from composable_mapping import CoordinateSystem
-from torch import Tensor
-from torch import any as torch_any
-from torch import where
+import jax.numpy as jnp
+from jaxmorph import CoordinateSystem
 
 
 def optimal_coordinates(
-    masks_and_paddings: Iterable[tuple[Tensor, int | None]],
+    masks_and_paddings: Iterable[tuple[jnp.ndarray, int | None]],
     original_coordinates: CoordinateSystem,
 ) -> CoordinateSystem:
     """Obtain coordinate system excluding areas outside mask."""
@@ -44,11 +42,11 @@ def optimal_coordinates(
     )
 
 
-def _get_bounding_box(mask: Tensor) -> Sequence[tuple[int, int]]:
+def _get_bounding_box(mask: jnp.ndarray) -> Sequence[tuple[int, int]]:
     bounding_box = []
     for dim in range(mask.ndim):
-        indices = where(torch_any(mask, dim=tuple(i for i in range(mask.ndim) if i != dim)))[0]
-        if indices.numel() == 0:
+        indices = jnp.nonzero(jnp.any(mask, axis=tuple(i for i in range(mask.ndim) if i != dim)))[0]
+        if indices.size == 0:
             raise ValueError(
                 "Mask is empty. This could be due to the images not overlapping initially. "
                 "If that is the case, consider using the --initialize-at-center option, or "

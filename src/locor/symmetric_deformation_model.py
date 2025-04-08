@@ -1,6 +1,7 @@
 """Symmetric deformation builder class"""
 
-from composable_mapping import (
+import jax.numpy as jnp
+from jaxmorph import (
     Affine,
     ComposableMapping,
     CoordinateSystem,
@@ -11,7 +12,6 @@ from composable_mapping import (
     SamplableVolume,
     ScalingAndSquaring,
 )
-from torch import Tensor
 
 from .affine_transformation import (
     AffineTransformationTypeDefinition,
@@ -36,7 +36,7 @@ class SymmetricDeformationModel:
 
     def set_affine(
         self,
-        affine_parameters: Tensor,
+        affine_parameters: jnp.ndarray,
         affine_transformation_type: AffineTransformationTypeDefinition,
         normalizing_affine: Affine,
         normalizing_affine_inverse: Affine,

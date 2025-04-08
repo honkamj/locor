@@ -3,10 +3,13 @@
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from composable_mapping import GridComposableMapping, SamplableVolume
-from torch import Tensor
+import jax.numpy as jnp
+import numpy as np
+from jaxmorph import GridComposableMapping, SamplableVolume
 
 from .affine_transformation import AffineTransformationTypeDefinition
+
+Array = jnp.ndarray | np.ndarray
 
 
 @dataclass
@@ -14,9 +17,9 @@ class ImageParameters:
     """Configuration parameters for a single stage related to either reference
     or moving image."""
 
-    image_sampling_spacing: Sequence[int | float] | Tensor
-    similarity_sliding_window_stride: Sequence[int] | Tensor
-    similarity_sliding_window_std: Sequence[int | float] | Tensor
+    image_sampling_spacing: Sequence[int | float] | Array
+    similarity_sliding_window_stride: Sequence[int] | Array
+    similarity_sliding_window_std: Sequence[int | float] | Array
 
     sampling_coordinates_padding: int | None = None
 
@@ -31,7 +34,7 @@ class RegularizationParameters:
     """Configuration parameters for the regularization."""
 
     weight: int | float
-    loss: Callable[[GridComposableMapping], Tensor]
+    loss: Callable[[GridComposableMapping], Array]
 
 
 @dataclass
@@ -55,9 +58,9 @@ class DenseStageParameters:
     n_iterations: int
     feature_learning_rate: int | float
     deformation_learning_rate: int | float
-    deformation_sampling_spacing: Sequence[int | float] | Tensor
+    deformation_sampling_spacing: Sequence[int | float] | Array
 
-    spline_grid_spacing: Sequence[int | float] | Tensor
+    spline_grid_spacing: Sequence[int | float] | Array
 
     reference_image_parameters: ImageParameters
     moving_image_parameters: ImageParameters

@@ -5,7 +5,10 @@ from importlib.util import module_from_spec, spec_from_file_location
 from os import makedirs
 from os.path import dirname
 
-from composable_mapping import (
+import jax
+import jax.numpy as jnp
+import numpy as np
+from jaxmorph import (
     ComposableMapping,
     CoordinateSystem,
     DataFormat,
@@ -19,10 +22,6 @@ from composable_mapping import (
 )
 from nibabel import Nifti1Image
 from nibabel import save as nib_save
-from torch import Tensor
-from torch import device as torch_device
-from torch import float16, float32, float64, tensor
-from torch.cuda import is_available as cuda_is_available
 
 from .config_parameters import ConfigBuildingArguments, RegistrationParameters
 from .default_config import build_config as build_default_config
@@ -113,7 +112,7 @@ def _main() -> None:
     registration_arguments.add_argument(
         "--device",
         help=(
-            "Device to use for registration, defaults to 'cuda:0' if available, else cpu. "
+            "Device to use for registration, defaults to cuda if available, else cpu. "
             "To use more than one device, provide the option multiple times "
             "(currently defining up to 2 devices are supported)."
         ),
@@ -130,15 +129,19 @@ def _main() -> None:
     args = parser.parse_args()
 
     if args.device is None:
-        devices = [torch_device("cuda:0" if cuda_is_available() else "cpu")]
+        try:
+            devices = jax.devices("cuda")[:2]
+        except RuntimeError:
+            devices = [jax.devices("cpu")[0]]
     else:
-        devices = [torch_device(device) for device in args.device]
+        devices = []
+        for device in args.device:
+            backend, index = device.split(":")
+            devices.append(jax.devices(backend)[int(index)])
 
-    dtype = {
-        "float16": float16,
-        "float32": float32,
-        "float64": float64,
-    }[args.dtype]
+    dtype = jnp.dtype(args.dtype)
+    if dtype == jnp.float64:
+        jax.config.update("jax_enable_x64", True)
 
     reference = from_file(args.reference, mask_path=args.mask_reference, dtype=dtype)
     moving = from_file(args.moving, mask_path=args.mask_moving, dtype=dtype)
@@ -168,19 +171,19 @@ def _main() -> None:
         devices=devices,
     )
 
-    moving = moving.cast(device=deformation_to_moving.device).modify_sampler(
+    moving = moving.device_put(device=deformation_to_moving.device).modify_sampler(
         LinearInterpolator(extrapolation_mode="zeros")
     )
-    reference = reference.cast(device=deformation_to_reference.device).modify_sampler(
+    reference = reference.device_put(device=deformation_to_reference.device).modify_sampler(
         LinearInterpolator(extrapolation_mode="zeros")
     )
     deformation_to_moving = (
-        initializing_affine.cast(device=deformation_to_moving.device) @ deformation_to_moving
-    ).resample_to(reference.coordinate_system.cast(device=deformation_to_moving.device))
+        initializing_affine.device_put(device=deformation_to_moving.device) @ deformation_to_moving
+    ).resample_to(reference.coordinate_system.device_put(device=deformation_to_moving.device))
     deformation_to_reference = (
         deformation_to_reference
-        @ initializing_affine.cast(device=deformation_to_reference.device).invert()
-    ).resample_to(moving.coordinate_system.cast(device=deformation_to_reference.device))
+        @ initializing_affine.device_put(device=deformation_to_reference.device).invert()
+    ).resample_to(moving.coordinate_system.device_put(device=deformation_to_reference.device))
 
     if args.output_moving is not None:
         _save_deformed_image(moving, deformation_to_moving, reference, args.output_moving)
@@ -209,13 +212,13 @@ def _save_deformed_image(
     path: str,
 ) -> None:
     deformed_image = (image @ deformation).resample_to(
-        target.coordinate_system.cast(device=image.device)
+        target.coordinate_system.device_put(device=image.device)
     )
-    deformed_values = deformed_image.sample().generate_values()
+    deformed_values = np.asarray(deformed_image.sample().generate_values())
     nib_image = Nifti1Image(
-        deformed_values[0].moveaxis(0, -1).squeeze(-1).numpy(force=True),
-        affine=deformed_image.coordinate_system.from_voxel_coordinates.as_affine_matrix().numpy(
-            force=True
+        np.moveaxis(deformed_values[0], 0, -1).squeeze(-1),
+        affine=np.asarray(
+            deformed_image.coordinate_system.from_voxel_coordinates.as_affine_matrix()
         ),
     )
     makedirs(dirname(path), exist_ok=True)
@@ -229,28 +232,26 @@ def _save_extrapolation_mask(
     path: str,
 ) -> None:
     deformed_image = (image.clear_mask() @ deformation).resample_to(
-        target.coordinate_system.cast(device=image.device)
+        target.coordinate_system.device_put(device=image.device)
     )
-    extrapolation_mask = deformed_image.sample().generate_mask(generate_missing_mask=True)
+    extrapolation_mask = np.asarray(
+        deformed_image.sample().generate_mask(generate_missing_mask=True)
+    )
     nib_image = Nifti1Image(
-        extrapolation_mask[0].moveaxis(0, -1).squeeze(-1).numpy(force=True).astype("uint8"),
-        affine=deformed_image.coordinate_system.from_voxel_coordinates.as_affine_matrix().numpy(
-            force=True
-        ),
+        np.moveaxis(extrapolation_mask[0], 0, -1).squeeze(-1).astype("uint8"),
+        affine=deformed_image.coordinate_system.from_voxel_coordinates.as_affine_matrix(),
     )
     makedirs(dirname(path), exist_ok=True)
     nib_save(nib_image, path)
 
 
 def _save_displacement_field(deformation: GridComposableMapping, path: str) -> None:
-    displacement_field = deformation.sample(
-        data_format=DataFormat.voxel_displacements()
-    ).generate_values()
+    displacement_field = np.asarray(
+        deformation.sample(data_format=DataFormat.voxel_displacements()).generate_values()
+    )
     image = Nifti1Image(
-        displacement_field[0].moveaxis(0, -1).numpy(force=True),
-        affine=deformation.coordinate_system.from_voxel_coordinates.as_affine_matrix().numpy(
-            force=True
-        ),
+        np.moveaxis(displacement_field[0], 0, -1),
+        affine=deformation.coordinate_system.from_voxel_coordinates.as_affine_matrix(),
     )
     makedirs(dirname(path), exist_ok=True)
     nib_save(image, path)
@@ -291,17 +292,9 @@ def _initialize(
     return moving, initializing_affine
 
 
-def _center_coordinate(coordinates: CoordinateSystem) -> Tensor:
+def _center_coordinate(coordinates: CoordinateSystem) -> jnp.ndarray | np.ndarray:
     return coordinates.from_voxel_coordinates(
-        mappable(
-            (
-                tensor(
-                    coordinates.spatial_shape, device=coordinates.device, dtype=coordinates.dtype
-                )
-                - 1
-            )
-            / 2
-        )
+        mappable((np.array(coordinates.spatial_shape, dtype=coordinates.dtype) - 1) / 2)
     ).generate_values()
 
 
