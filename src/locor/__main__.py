@@ -172,10 +172,10 @@ def _main() -> None:
     )
 
     moving = moving.device_put(device=deformation_to_moving.device).modify_sampler(
-        LinearInterpolator(extrapolation_mode="zeros")
+        LinearInterpolator(extrapolation_mode="constant")
     )
     reference = reference.device_put(device=deformation_to_reference.device).modify_sampler(
-        LinearInterpolator(extrapolation_mode="zeros")
+        LinearInterpolator(extrapolation_mode="constant")
     )
     deformation_to_moving = (
         initializing_affine.device_put(device=deformation_to_moving.device) @ deformation_to_moving

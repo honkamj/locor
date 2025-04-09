@@ -7,7 +7,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
+import optax  # type: ignore
 from jaxmorph import (
     Affine,
     Center,
@@ -149,9 +149,12 @@ def _register(
 
         for index, dense_stage_parameters in enumerate(parameters.dense_stage_parameters):
             print(f"Starting dense stage {index + 1}{process_rank_postfix}")
+            subkey_1, key_1 = jax.random.split(key_1)
+            subkey_2, key_2 = jax.random.split(key_2)
             deformations = _register_dense(
                 initial_deformations=deformations,
                 feature_extractors=feature_extractors,
+                keys=[subkey_1, subkey_2],
                 reference=reference,
                 moving=moving,
                 parameters=dense_stage_parameters,
@@ -219,7 +222,6 @@ def _register_affine(
     normalizing_affine, inverse_normalizing_affine = _normalizing_affine(
         moving.coordinate_system.device_put(device=device)
     )
-    progress_bar = tqdm(range(parameters.n_iterations), position=rank)
 
     def loss(
         affine_parameters: jnp.ndarray,
@@ -297,6 +299,7 @@ def _register_affine(
         return loss_value, affine_parameters, optimizer_state, feature_optimizer_states
 
     key_1, key_2 = keys
+    progress_bar = tqdm(range(parameters.n_iterations), position=rank, smoothing=0.95)
     for _ in progress_bar:
         subkey_1, key_1 = jax.random.split(key_1)
         subkey_2, key_2 = jax.random.split(key_2)
@@ -344,13 +347,14 @@ def _normalizing_affine(coordinates: CoordinateSystem) -> tuple[Affine, Affine]:
 def _register_dense(
     initial_deformations: Sequence[SymmetricDeformationModel],
     feature_extractors: Sequence[FeatureExtractor],
+    keys: Sequence[jnp.ndarray],
     reference: GridComposableMapping,
     moving: GridComposableMapping,
     parameters: DenseStageParameters,
     device: jax.Device,
     rank: int | None,
 ) -> list[SymmetricDeformationModel]:
-    deformation_coordinates = reference.coordinate_system.cast(device=device)
+    deformation_coordinates = reference.coordinate_system.device_put(device=device)
     deformation_sampling_coordinates = deformation_coordinates.reformat(
         voxel_size=parameters.deformation_sampling_spacing,
         reference=Center(),
@@ -361,28 +365,27 @@ def _register_dense(
         reference=Center(),
         spatial_shape=OriginalFOV(fitting_method="ceil") + 1,
     )
-    spline_parameters: Module = SplineParameters(
+    spline_parameters = initialize_spline_parameters(
         n_dims=len(reference.coordinate_system.spatial_shape),
         spatial_shape=spline_svf_coordinates.spatial_shape,
     )
-    spline_parameters.to(device=device, dtype=reference.dtype)
     if rank is not None:
-        spline_parameters_distributed: Module = DistributedDataParallel(spline_parameters)
         process_rank_postfix = f" (process {rank})"
     else:
-        spline_parameters_distributed = spline_parameters
         process_rank_postfix = ""
-    optimizer = Adam(
-        spline_parameters.parameters(),
-        lr=parameters.deformation_learning_rate,
+    optimizer = optax.adam(
+        learning_rate=parameters.deformation_learning_rate,
     )
-    feature_optimizers: list[Adam] = []
+    optimizer_state = optimizer.init(spline_parameters)
+    feature_optimizers: list[optax.GradientTransformation] = []
+    feature_optimizer_states: list[optax.OptState] = []
     for feature_extractor in feature_extractors:
-        feature_optimizers.append(
-            Adam(
-                feature_extractor.parameters(),
-                lr=parameters.feature_learning_rate,
-            )
+        feature_optimizer = optax.adam(
+            learning_rate=parameters.feature_learning_rate,
+        )
+        feature_optimizers.append(feature_optimizer)
+        feature_optimizer_states.append(
+            feature_optimizer.init(eqx.filter(feature_extractor, eqx.is_array))
         )
     registration_inputs = _initialize_registration_stage(
         initial_deformations=initial_deformations,
@@ -391,102 +394,157 @@ def _register_dense(
         parameters=parameters,
         device=device,
     )
-    progress_bar = tqdm(range(parameters.n_iterations), position=rank)
-    for _ in progress_bar:
-        with sampling_cache():
-            optimizer.zero_grad()
-            for feature_optimizer in feature_optimizers:
-                feature_optimizer.zero_grad()
-            update_svf = samplable_volume(
-                spline_parameters_distributed(),
-                coordinate_system=spline_svf_coordinates,
-                data_format=DataFormat.voxel_displacements(),
-                sampler=CubicSplineSampler(mask_extrapolated_regions=False),
-            ).resample_to(
-                deformation_sampling_coordinates,
+
+    def loss(
+        spline_parameters: jnp.ndarray,
+        feature_extractors: Sequence[FeatureExtractor],
+        keys: Sequence[jnp.ndarray],
+    ) -> tuple[jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray]]:
+        update_svf = samplable_volume(
+            spline_parameters,
+            coordinate_system=spline_svf_coordinates,
+            data_format=DataFormat.voxel_displacements(),
+            sampler=CubicSplineSampler(mask_extrapolated_regions=False),
+        ).resample_to(
+            deformation_sampling_coordinates,
+        )
+        similarity_losses = []
+        regularization_losses = []
+        for (
+            (reference_initialized, moving_initialized, similarity_coordinates),
+            feature_extractor,
+            initial_deformation,
+            key,
+        ) in reversed(
+            list(zip(registration_inputs, feature_extractors, initial_deformations, keys))
+        ):
+            reference_image_parameters = (
+                parameters.reference_image_parameters,
+                parameters.moving_image_parameters,
+            )[initial_deformation.inverse]
+            reference_regularization_parameters = (
+                parameters.reference_regularization_parameters,
+                parameters.moving_regularization_parameters,
+            )[initial_deformation.inverse]
+            updated_deformation = initial_deformation.update(
+                update_svf=update_svf,
+                n_scalings_and_squarings=parameters.n_scalings_and_squarings,
             )
-            similarity_losses = []
-            regularization_losses = []
-            for (
-                (reference_initialized, moving_initialized, similarity_coordinates),
-                feature_extractor,
-                initial_deformation,
-            ) in reversed(list(zip(registration_inputs, feature_extractors, initial_deformations))):
-                reference_image_parameters = (
-                    parameters.reference_image_parameters,
-                    parameters.moving_image_parameters,
-                )[initial_deformation.inverse]
-                reference_regularization_parameters = (
-                    parameters.reference_regularization_parameters,
-                    parameters.moving_regularization_parameters,
-                )[initial_deformation.inverse]
-                updated_deformation = initial_deformation.update(
-                    update_svf=update_svf,
-                    n_scalings_and_squarings=parameters.n_scalings_and_squarings,
-                )
-                deformation_to_moving, deformation_to_moving_without_affine = (
-                    updated_deformation.build_full_deformation(deformation_sampling_coordinates)
-                )
-                registered_moving = (moving_initialized @ deformation_to_moving).resample_to(
-                    reference_initialized
-                )
-                registered_moving_values, registered_moving_mask = (
-                    registered_moving.sample().generate()
-                )
-                features_moving = feature_extractor(registered_moving_values)
-                similarity_sampler = _similarity_sampler(
-                    reference_initialized,
-                    reference_image_parameters,
-                )
-                # We disable the cache since the similarity sampler differs per iteration.
-                with no_sampling_cache():
-                    similarity = local_least_squares_error(
-                        samplable_volume(
-                            features_moving,
-                            mask=registered_moving_mask,
-                            coordinate_system=reference_initialized.coordinate_system,
-                        ),
-                        reference_initialized,
-                        sampler=similarity_sampler,
-                        coordinates=similarity_coordinates,
-                        regularization=reference_image_parameters.matrix_solve_epsilon,
-                        eps=reference_image_parameters.similarity_logarithm_epsilon,
+            deformation_to_moving, deformation_to_moving_without_affine = (
+                updated_deformation.build_full_deformation(deformation_sampling_coordinates)
+            )
+            registered_moving = (moving_initialized @ deformation_to_moving).resample_to(
+                reference_initialized
+            )
+            registered_moving_values, registered_moving_mask = registered_moving.sample().generate()
+            features_moving = feature_extractor(registered_moving_values)
+            similarity_sampler = _similarity_sampler(
+                reference_initialized,
+                reference_image_parameters,
+                key,
+            )
+            similarity = local_least_squares_error(
+                samplable_volume(
+                    features_moving,
+                    mask=registered_moving_mask,
+                    coordinate_system=reference_initialized.coordinate_system,
+                ),
+                reference_initialized,
+                sampler=similarity_sampler,
+                coordinates=similarity_coordinates,
+                regularization=reference_image_parameters.matrix_solve_epsilon,
+                eps=reference_image_parameters.similarity_logarithm_epsilon,
+            ).mean()
+
+            if reference_regularization_parameters is not None:
+                regularity = (
+                    reference_regularization_parameters.weight
+                    * reference_regularization_parameters.loss(
+                        deformation_to_moving_without_affine
                     ).mean()
+                )
+            else:
+                regularity = jnp.zeros(tuple(), dtype=similarity.dtype)
 
-                if reference_regularization_parameters is not None:
-                    regularity = (
-                        reference_regularization_parameters.weight
-                        * reference_regularization_parameters.loss(
-                            deformation_to_moving_without_affine
-                        ).mean()
-                    )
-                else:
-                    regularity = tensor(0.0, device=device, dtype=similarity.dtype)
+            similarity_losses.append(similarity)
+            regularization_losses.append(regularity)
+        mean_similarity_loss = jnp.stack(similarity_losses).mean()
+        mean_regularization_loss = jnp.stack(regularization_losses).mean()
+        loss = mean_similarity_loss + mean_regularization_loss
+        return loss, (mean_similarity_loss, mean_regularization_loss)
 
-                similarity_losses.append(similarity)
-                regularization_losses.append(regularity)
-            mean_similarity_loss = stack(similarity_losses).mean()
-            mean_regularization_loss = stack(regularization_losses).mean()
-            loss = mean_similarity_loss + mean_regularization_loss
-
-            loss.backward()
-            optimizer.step()
-            for feature_optimizer in feature_optimizers:
-                feature_optimizer.step()
-            progress_bar.set_description(
-                f"Loss{process_rank_postfix}: {loss.item():.4e} "
-                f"(sim: {mean_similarity_loss.item():.4e}, "
-                f"reg: {float(mean_regularization_loss):.4e})"
+    @jax.jit
+    def step(
+        spline_parameters: jnp.ndarray,
+        feature_extractors: Sequence[FeatureExtractor],
+        optimizer_state: optax.OptState,
+        feature_optimizer_states: Sequence[optax.OptState],
+        keys: Sequence[jnp.ndarray],
+    ) -> tuple[
+        jnp.ndarray,
+        jnp.ndarray,
+        jnp.ndarray,
+        jnp.ndarray,
+        optax.GradientTransformation,
+        Sequence[optax.GradientTransformation],
+    ]:
+        feature_extractors = list(feature_extractors)
+        feature_optimizer_states = list(feature_optimizer_states)
+        (loss_value, (similarity_loss_value, regularization_loss_value)), grads = (
+            jax.value_and_grad(loss, argnums=(0, 1), has_aux=True)(
+                spline_parameters, feature_extractors, keys
             )
+        )
+        updates, optimizer_state = optimizer.update(grads[0], optimizer_state)
+        spline_parameters = optax.apply_updates(spline_parameters, updates)
+        for i, feature_optimizer in enumerate(feature_optimizers):
+            updates, feature_optimizer_states[i] = feature_optimizer.update(
+                grads[1][i], feature_optimizer_states[i]
+            )
+            feature_extractors[i] = optax.apply_updates(feature_extractors[i], updates)
+        return (
+            loss_value,
+            similarity_loss_value,
+            regularization_loss_value,
+            spline_parameters,
+            optimizer_state,
+            feature_optimizer_states,
+        )
+
+    key_1, key_2 = keys
+    progress_bar = tqdm(range(parameters.n_iterations), position=rank, smoothing=0.95)
+    for _ in progress_bar:
+        subkey_1, key_1 = jax.random.split(key_1)
+        subkey_2, key_2 = jax.random.split(key_2)
+        print("Taking first step!")
+        (
+            loss_value,
+            similarity_loss_value,
+            regularization_loss_value,
+            spline_parameters,
+            optimizer_state,
+            feature_optimizer_states,
+        ) = step(
+            spline_parameters,
+            feature_extractors,
+            optimizer_state,
+            feature_optimizer_states,
+            [subkey_1, subkey_2],
+        )
+        progress_bar.set_description(
+            f"Loss{process_rank_postfix}: {float(loss_value):.4e} "
+            f"(sim: {float(similarity_loss_value):.4e}, "
+            f"reg: {float(regularization_loss_value):.4e})"
+        )
+
     final_update_svf = samplable_volume(
-        spline_parameters.transformation_parameters.data,
+        spline_parameters,
         coordinate_system=spline_svf_coordinates,
         data_format=DataFormat.voxel_displacements(),
         sampler=CubicSplineSampler(mask_extrapolated_regions=False),
     ).resample_to(
         deformation_coordinates,
     )
-    clear_sampling_cache()
     return [
         initial_deformation.update(
             update_svf=final_update_svf,
