@@ -201,16 +201,16 @@ def _register_affine(
         learning_rate=parameters.transformation_learning_rate,
     )
     optimizer_state = optimizer.init(affine_parameters)
-    feature_optimizers: list[optax.GradientTransformation] = []
-    feature_optimizer_states: list[optax.OptState] = []
-    for feature_extractor in feature_extractors:
-        feature_optimizer = optax.adam(
+    feature_optimizers: Sequence[optax.GradientTransformation] = [
+        optax.adam(
             learning_rate=parameters.feature_learning_rate,
         )
-        feature_optimizers.append(feature_optimizer)
-        feature_optimizer_states.append(
-            feature_optimizer.init(eqx.filter(feature_extractor, eqx.is_array))
-        )
+        for _ in feature_extractors
+    ]
+    feature_optimizer_states: Sequence[optax.OptState] = [
+        feature_optimizer.init(eqx.filter(feature_extractor, eqx.is_array))
+        for feature_extractor, feature_optimizer in zip(feature_extractors, feature_optimizers)
+    ]
 
     registration_inputs = _initialize_registration_stage(
         initial_deformations=initial_deformations,
@@ -224,10 +224,10 @@ def _register_affine(
     )
 
     def loss(
-        affine_parameters: jnp.ndarray,
-        feature_extractors: Sequence[FeatureExtractor],
+        inputs: tuple[jnp.ndarray, Sequence[FeatureExtractor]],
         keys: Sequence[jnp.ndarray],
     ) -> jnp.ndarray:
+        affine_parameters, feature_extractors = inputs
         similarity_losses = []
         for (
             (reference_initialized, moving_initialized, similarity_coordinates),
@@ -266,12 +266,13 @@ def _register_affine(
                 coordinates=similarity_coordinates,
                 regularization=reference_image_parameters.matrix_solve_epsilon,
                 eps=reference_image_parameters.similarity_logarithm_epsilon,
-            ).mean()
+            )
+            similarity_loss = similarity_loss.mean()
             similarity_losses.append(similarity_loss)
         loss = jnp.stack(similarity_losses).mean()
         return loss
 
-    @jax.jit
+    @eqx.filter_jit
     def step(
         affine_parameters: jnp.ndarray,
         feature_extractors: Sequence[FeatureExtractor],
@@ -287,16 +288,18 @@ def _register_affine(
     ]:
         feature_extractors = list(feature_extractors)
         feature_optimizer_states = list(feature_optimizer_states)
-        loss_value, grads = jax.value_and_grad(loss, argnums=(0, 1))(
-            affine_parameters, feature_extractors, keys
+        loss_value, (affine_grad, feature_extractor_grads) = eqx.filter_value_and_grad(loss)(
+            (affine_parameters, feature_extractors), keys
         )
-        updates, optimizer_state = optimizer.update(grads[0], optimizer_state)
+        updates, optimizer_state = optimizer.update(affine_grad, optimizer_state, affine_parameters)
         affine_parameters = optax.apply_updates(affine_parameters, updates)
         for i, feature_optimizer in enumerate(feature_optimizers):
             updates, feature_optimizer_states[i] = feature_optimizer.update(
-                grads[1][i], feature_optimizer_states[i]
+                feature_extractor_grads[i],
+                feature_optimizer_states[i],
+                eqx.filter(feature_extractors[i], eqx.is_array),
             )
-            feature_extractors[i] = optax.apply_updates(feature_extractors[i], updates)
+            feature_extractors[i] = eqx.apply_updates(feature_extractors[i], updates)
         return (
             loss_value,
             affine_parameters,
@@ -389,16 +392,16 @@ def _register_dense(
         learning_rate=parameters.deformation_learning_rate,
     )
     optimizer_state = optimizer.init(spline_parameters)
-    feature_optimizers: list[optax.GradientTransformation] = []
-    feature_optimizer_states: list[optax.OptState] = []
-    for feature_extractor in feature_extractors:
-        feature_optimizer = optax.adam(
+    feature_optimizers: Sequence[optax.GradientTransformation] = [
+        optax.adam(
             learning_rate=parameters.feature_learning_rate,
         )
-        feature_optimizers.append(feature_optimizer)
-        feature_optimizer_states.append(
-            feature_optimizer.init(eqx.filter(feature_extractor, eqx.is_array))
-        )
+        for _ in feature_extractors
+    ]
+    feature_optimizer_states: Sequence[optax.OptState] = [
+        feature_optimizer.init(eqx.filter(feature_extractor, eqx.is_array))
+        for feature_extractor, feature_optimizer in zip(feature_extractors, feature_optimizers)
+    ]
     registration_inputs = _initialize_registration_stage(
         initial_deformations=initial_deformations,
         reference=reference,
@@ -408,10 +411,10 @@ def _register_dense(
     )
 
     def loss(
-        spline_parameters: jnp.ndarray,
-        feature_extractors: Sequence[FeatureExtractor],
+        inputs: tuple[jnp.ndarray, Sequence[FeatureExtractor]],
         keys: Sequence[jnp.ndarray],
     ) -> tuple[jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray]]:
+        (spline_parameters, feature_extractors) = inputs
         update_svf = samplable_volume(
             spline_parameters,
             coordinate_system=spline_svf_coordinates,
@@ -485,7 +488,7 @@ def _register_dense(
         loss = mean_similarity_loss + mean_regularization_loss
         return loss, (mean_similarity_loss, mean_regularization_loss)
 
-    @jax.jit
+    @eqx.filter_jit
     def step(
         spline_parameters: jnp.ndarray,
         feature_extractors: Sequence[FeatureExtractor],
@@ -503,18 +506,21 @@ def _register_dense(
     ]:
         feature_extractors = list(feature_extractors)
         feature_optimizer_states = list(feature_optimizer_states)
-        (loss_value, (similarity_loss_value, regularization_loss_value)), grads = (
-            jax.value_and_grad(loss, argnums=(0, 1), has_aux=True)(
-                spline_parameters, feature_extractors, keys
-            )
+        (loss_value, (similarity_loss_value, regularization_loss_value)), (
+            spline_grad,
+            feature_extractor_grads,
+        ) = eqx.filter_value_and_grad(loss, has_aux=True)(
+            (spline_parameters, feature_extractors), keys
         )
-        updates, optimizer_state = optimizer.update(grads[0], optimizer_state)
+        updates, optimizer_state = optimizer.update(spline_grad, optimizer_state, spline_parameters)
         spline_parameters = optax.apply_updates(spline_parameters, updates)
         for i, feature_optimizer in enumerate(feature_optimizers):
             updates, feature_optimizer_states[i] = feature_optimizer.update(
-                grads[1][i], feature_optimizer_states[i]
+                feature_extractor_grads[i],
+                feature_optimizer_states[i],
+                eqx.filter(feature_extractors[i], eqx.is_array),
             )
-            feature_extractors[i] = optax.apply_updates(feature_extractors[i], updates)
+            feature_extractors[i] = eqx.apply_updates(feature_extractors[i], updates)
         return (
             loss_value,
             similarity_loss_value,
