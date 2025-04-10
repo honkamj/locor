@@ -46,7 +46,7 @@ def build_config(arguments: ConfigBuildingArguments) -> RegistrationParameters:
         feature_extraction_parameters_reference=feature_extraction_parameters,
         feature_extraction_parameters_moving=feature_extraction_parameters,
         affine_stage_parameters=AffineStageParameters(
-            n_iterations=0,
+            n_iterations=80,
             feature_learning_rate=feature_learning_rate,
             transformation_learning_rate=5e-3,
             reference_image_parameters=ImageParameters(

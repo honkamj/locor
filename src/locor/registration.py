@@ -281,6 +281,7 @@ def _register_affine(
     ) -> tuple[
         jnp.ndarray,
         jnp.ndarray,
+        Sequence[FeatureExtractor],
         optax.GradientTransformation,
         Sequence[optax.GradientTransformation],
     ]:
@@ -296,14 +297,26 @@ def _register_affine(
                 grads[1][i], feature_optimizer_states[i]
             )
             feature_extractors[i] = optax.apply_updates(feature_extractors[i], updates)
-        return loss_value, affine_parameters, optimizer_state, feature_optimizer_states
+        return (
+            loss_value,
+            affine_parameters,
+            feature_extractors,
+            optimizer_state,
+            feature_optimizer_states,
+        )
 
     key_1, key_2 = keys
     progress_bar = tqdm(range(parameters.n_iterations), position=rank, smoothing=0.95)
     for _ in progress_bar:
         subkey_1, key_1 = jax.random.split(key_1)
         subkey_2, key_2 = jax.random.split(key_2)
-        loss_value, affine_parameters, optimizer_state, feature_optimizer_states = step(
+        (
+            loss_value,
+            affine_parameters,
+            feature_extractors,
+            optimizer_state,
+            feature_optimizer_states,
+        ) = step(
             affine_parameters,
             feature_extractors,
             optimizer_state,
@@ -484,6 +497,7 @@ def _register_dense(
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
+        Sequence[FeatureExtractor],
         optax.GradientTransformation,
         Sequence[optax.GradientTransformation],
     ]:
@@ -506,6 +520,7 @@ def _register_dense(
             similarity_loss_value,
             regularization_loss_value,
             spline_parameters,
+            feature_extractors,
             optimizer_state,
             feature_optimizer_states,
         )
@@ -520,6 +535,7 @@ def _register_dense(
             similarity_loss_value,
             regularization_loss_value,
             spline_parameters,
+            feature_extractors,
             optimizer_state,
             feature_optimizer_states,
         ) = step(
