@@ -715,7 +715,7 @@ def _smoothed_mapping(
     smoothing_stds = 2.0 * sampling_spacing / voxel_size / 6.0
     smoothing_stds = smoothing_stds.at[sampling_spacing / voxel_size <= 1.0 + 1e-3].set(1e-6)
     smoothing_sampler = GaussianSampler(
-        truncate_at=[truncate_at_n_stds * std for std in smoothing_stds],
+        truncate_at=[truncate_at_n_stds * float(std) for std in smoothing_stds],
         std=jnp.asarray(smoothing_stds),
     )
     sampled_image = image.sample()
