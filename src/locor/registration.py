@@ -516,7 +516,6 @@ def _register_dense(
     for _ in progress_bar:
         subkey_1, key_1 = jax.random.split(key_1)
         subkey_2, key_2 = jax.random.split(key_2)
-        print("Taking first step!")
         (
             loss_value,
             similarity_loss_value,
