@@ -143,8 +143,9 @@ def _main() -> None:
     if dtype == jnp.float64:
         jax.config.update("jax_enable_x64", True)
 
-    reference = from_file(args.reference, mask_path=args.mask_reference, dtype=dtype)
-    moving = from_file(args.moving, mask_path=args.mask_moving, dtype=dtype)
+    with jax.default_device(jax.devices("cpu")[0]):
+        reference = from_file(args.reference, mask_path=args.mask_reference, dtype=dtype)
+        moving = from_file(args.moving, mask_path=args.mask_moving, dtype=dtype)
 
     initialized_moving, initializing_affine = _initialize(
         args.initialize_at_center, moving, reference
