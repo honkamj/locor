@@ -17,8 +17,14 @@ class GaussianKernel(PiecewiseKernelDefinition):
         std: jnp.ndarray | None = None,
     ) -> None:
         self._truncate_at = truncate_at
-        self._mean = mean
-        self._std = std
+        if mean is None:
+            self._mean: Sequence[float] | jnp.ndarray = [0.0] * len(truncate_at)
+        else:
+            self._mean = mean
+        if std is None:
+            self._std: Sequence[float] | jnp.ndarray = [1.0] * len(truncate_at)
+        else:
+            self._std = std
 
     def is_interpolating_kernel(self, spatial_dim: int) -> bool:
         return False
@@ -35,17 +41,21 @@ class GaussianKernel(PiecewiseKernelDefinition):
         )
 
     def evaluate(self, spatial_dim: int, coordinate: jnp.ndarray) -> jnp.ndarray:
-        if self._mean is None:
-            mean: float | jnp.ndarray = 0.0
-        else:
-            mean = self._mean[spatial_dim]
-        if self._std is None:
-            std: float | jnp.ndarray = 1.0
-        else:
-            std = self._std[spatial_dim]
-        values = jnp.exp(-((coordinate - mean) ** 2) / (2 * std**2))
-        values = values / values.sum()
+        values = jnp.exp(
+            -((coordinate - self._mean[spatial_dim]) ** 2) / (2 * self._std[spatial_dim] ** 2)
+        )
         return values
+
+    def derivative(self, spatial_dim: int) -> PiecewiseKernelDefinition:
+        raise NotImplementedError(
+            "Derivative of Gaussian kernel is not implemented "
+            "(normalization brakes the generic implementation)."
+        )
+
+    def __call__(self, spatial_dim: int, coordinates: jnp.ndarray):
+        kernel = super().__call__(spatial_dim, coordinates)
+        kernel = kernel / kernel.sum(axis=1, keepdims=True)
+        return kernel
 
 
 class GaussianSampler(SeparableSampler):
