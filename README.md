@@ -2,11 +2,7 @@
 
 Locor is a generic multimodal image registration tool based on modaling local functional dependence with linear combination of learned basis functions.
 
-## Installation
-
-Install using pip by running the commands
-
-    pip install git+https://github.com/honkamj/locor
+This is development branch for JAX-version of the method, and is currently not usable.
 
 ## Usage
 

@@ -97,6 +97,7 @@ def _register(
 
         key = jax.random.PRNGKey(0)
         key_1, key_2 = jax.random.split(key, num=2)
+        keys: list[jnp.ndarray] = []
 
         feature_extractors: list[FeatureExtractor] = []
         deformations: list[SymmetricDeformationModel] = []
@@ -118,28 +119,33 @@ def _register(
             full_deformation_references.append(
                 reference.coordinate_system.device_put(device=device)
             )
+            keys.append(key_1)
         if rank in (1, None):
             key_2, feature_extractor_key_2 = jax.random.split(key_2)
             feature_extractors.append(
                 FeatureExtractor(
                     n_dims=n_dims,
                     n_input_channels=2 * n_moving_channels,
-                    n_hidden_features=parameters.feature_extraction_parameters_moving.n_hidden_features,
+                    n_hidden_features=(
+                        parameters.feature_extraction_parameters_moving.n_hidden_features
+                    ),
                     n_output_channels=parameters.feature_extraction_parameters_moving.n_features,
                     key=feature_extractor_key_2,
                 )
             )
             deformations.append(SymmetricDeformationModel(inverse=True))
             full_deformation_references.append(moving.coordinate_system.device_put(device=device))
+            keys.append(key_2)
 
         if parameters.affine_stage_parameters is not None:
             print(f"Starting affine stage{process_rank_postfix}")
-            subkey_1, key_1 = jax.random.split(key_1)
-            subkey_2, key_2 = jax.random.split(key_2)
+            splitted_keys = [jax.random.split(key) for key in keys]
+            subkeys = [splitted_key[0] for splitted_key in splitted_keys]
+            keys = [splitted_key[1] for splitted_key in splitted_keys]
             deformations = _register_affine(
                 initial_deformations=deformations,
                 feature_extractors=feature_extractors,
-                keys=[subkey_1, subkey_2],
+                keys=subkeys,
                 reference=reference,
                 moving=moving,
                 parameters=parameters.affine_stage_parameters,
@@ -149,12 +155,13 @@ def _register(
 
         for index, dense_stage_parameters in enumerate(parameters.dense_stage_parameters):
             print(f"Starting dense stage {index + 1}{process_rank_postfix}")
-            subkey_1, key_1 = jax.random.split(key_1)
-            subkey_2, key_2 = jax.random.split(key_2)
+            splitted_keys = [jax.random.split(key) for key in keys]
+            subkeys = [splitted_key[0] for splitted_key in splitted_keys]
+            keys = [splitted_key[1] for splitted_key in splitted_keys]
             deformations = _register_dense(
                 initial_deformations=deformations,
                 feature_extractors=feature_extractors,
-                keys=[subkey_1, subkey_2],
+                keys=subkeys,
                 reference=reference,
                 moving=moving,
                 parameters=dense_stage_parameters,

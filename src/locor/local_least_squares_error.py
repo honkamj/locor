@@ -91,16 +91,16 @@ def local_least_squares_error(
     least_squares_matrix = least_squares_matrix.at[
         ..., source_product_indices_1, source_product_indices_2
     ].set(source_product_avg)
-    # least_squares_matrix = least_squares_matrix.at[
-    #    ..., source_product_indices_2, source_product_indices_1
-    # ].set(source_product_avg)
+    least_squares_matrix = least_squares_matrix.at[
+        ..., source_product_indices_2, source_product_indices_1
+    ].set(source_product_avg)
     least_squares_matrix = least_squares_matrix.at[..., source_indices, source_indices].set(
         source_squared_avg
     )
     if regularization is not None:
         regularization_diagonal = jnp.full((n_source_features,), regularization, dtype=source.dtype)
         least_squares_matrix = least_squares_matrix + jnp.diag(regularization_diagonal)
-    weights = jsp.linalg.solve(least_squares_matrix, source_target_avg, assume_a="pos")
+    weights = jsp.linalg.solve(least_squares_matrix, source_target_avg)
 
     loss = jnp.mean(
         jnp.log(
