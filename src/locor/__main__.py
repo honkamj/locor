@@ -17,8 +17,8 @@ from composable_mapping import (
     from_file,
     mappable,
 )
-from nibabel import Nifti1Image
-from nibabel import save as nib_save
+from nibabel import Nifti1Image  # type: ignore
+from nibabel import save as nib_save  # type: ignore
 from torch import Tensor
 from torch import device as torch_device
 from torch import float16, float32, float64, tensor
@@ -159,7 +159,7 @@ def _main() -> None:
         and args.extrapolation_mask_moving is None
         and args.extrapolation_mask_reference is None
     ):
-        raise ValueError("No output specified.")
+        raise ValueError("No outputs specified.")
 
     deformation_to_moving, deformation_to_reference = register(
         reference=reference,

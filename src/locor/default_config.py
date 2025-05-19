@@ -1,6 +1,6 @@
-"""Default configuration for the image registration tool.
+"""Default configuration for Locor.
 
-Configurations for the image registration tool are defined as Python files that
+Configurations for Locor are defined as Python files that
 include a function with name `build_config` that is then called to dynamically
 build the configuration parameters based on the inputs.
 """
@@ -32,11 +32,13 @@ def build_config(arguments: ConfigBuildingArguments) -> RegistrationParameters:
     # reduced relative bending energy weight.
     min_voxel_spacing_reference = reference_voxel_spacing.amin().item()
 
-    regularization_base_weight = 5.0e2
+    sliding_window_std = 0.8
+
+    regularization_base_weight = 4.0e2
     regularization_loss = BendingEnergy()
 
     feature_extraction_parameters = FeatureExtractionParameters(
-        n_features=4,
+        n_features=5,
         n_hidden_features=[16, 16],
     )
 
@@ -50,12 +52,12 @@ def build_config(arguments: ConfigBuildingArguments) -> RegistrationParameters:
             reference_image_parameters=ImageParameters(
                 image_sampling_spacing=2 * reference_voxel_spacing,
                 similarity_sliding_window_stride=similarity_sliding_window_stride,
-                similarity_sliding_window_std=2 * reference_voxel_spacing,
+                similarity_sliding_window_std=2 * reference_voxel_spacing * sliding_window_std,
             ),
             moving_image_parameters=ImageParameters(
                 image_sampling_spacing=2 * moving_voxel_spacing,
                 similarity_sliding_window_stride=similarity_sliding_window_stride,
-                similarity_sliding_window_std=2 * moving_voxel_spacing,
+                similarity_sliding_window_std=2 * moving_voxel_spacing * sliding_window_std,
             ),
             transformation_type=AffineTransformationTypeDefinition.full(),
         ),
@@ -69,12 +71,12 @@ def build_config(arguments: ConfigBuildingArguments) -> RegistrationParameters:
                 reference_image_parameters=ImageParameters(
                     image_sampling_spacing=4 * reference_voxel_spacing,
                     similarity_sliding_window_stride=similarity_sliding_window_stride,
-                    similarity_sliding_window_std=4 * reference_voxel_spacing,
+                    similarity_sliding_window_std=4 * reference_voxel_spacing * sliding_window_std,
                 ),
                 moving_image_parameters=ImageParameters(
                     image_sampling_spacing=4 * moving_voxel_spacing,
                     similarity_sliding_window_stride=similarity_sliding_window_stride,
-                    similarity_sliding_window_std=4 * moving_voxel_spacing,
+                    similarity_sliding_window_std=4 * moving_voxel_spacing * sliding_window_std,
                 ),
                 reference_regularization_parameters=RegularizationParameters(
                     weight=regularization_base_weight * (4 * min_voxel_spacing_reference) ** 2,
@@ -91,13 +93,13 @@ def build_config(arguments: ConfigBuildingArguments) -> RegistrationParameters:
                 reference_image_parameters=ImageParameters(
                     image_sampling_spacing=4 * reference_voxel_spacing,
                     similarity_sliding_window_stride=similarity_sliding_window_stride,
-                    similarity_sliding_window_std=4 * reference_voxel_spacing,
+                    similarity_sliding_window_std=4 * reference_voxel_spacing * sliding_window_std,
                     sampling_coordinates_padding=10,
                 ),
                 moving_image_parameters=ImageParameters(
                     image_sampling_spacing=4 * moving_voxel_spacing,
                     similarity_sliding_window_stride=similarity_sliding_window_stride,
-                    similarity_sliding_window_std=4 * moving_voxel_spacing,
+                    similarity_sliding_window_std=4 * moving_voxel_spacing * sliding_window_std,
                     sampling_coordinates_padding=10,
                 ),
                 reference_regularization_parameters=RegularizationParameters(
@@ -115,13 +117,13 @@ def build_config(arguments: ConfigBuildingArguments) -> RegistrationParameters:
                 reference_image_parameters=ImageParameters(
                     image_sampling_spacing=2 * reference_voxel_spacing,
                     similarity_sliding_window_stride=similarity_sliding_window_stride,
-                    similarity_sliding_window_std=2 * reference_voxel_spacing,
+                    similarity_sliding_window_std=2 * reference_voxel_spacing * sliding_window_std,
                     sampling_coordinates_padding=10,
                 ),
                 moving_image_parameters=ImageParameters(
                     image_sampling_spacing=2 * moving_voxel_spacing,
                     similarity_sliding_window_stride=similarity_sliding_window_stride,
-                    similarity_sliding_window_std=2 * moving_voxel_spacing,
+                    similarity_sliding_window_std=2 * moving_voxel_spacing * sliding_window_std,
                     sampling_coordinates_padding=10,
                 ),
                 reference_regularization_parameters=RegularizationParameters(
@@ -139,13 +141,13 @@ def build_config(arguments: ConfigBuildingArguments) -> RegistrationParameters:
                 reference_image_parameters=ImageParameters(
                     image_sampling_spacing=2 * reference_voxel_spacing,
                     similarity_sliding_window_stride=similarity_sliding_window_stride,
-                    similarity_sliding_window_std=2 * reference_voxel_spacing,
+                    similarity_sliding_window_std=2 * reference_voxel_spacing * sliding_window_std,
                     sampling_coordinates_padding=10,
                 ),
                 moving_image_parameters=ImageParameters(
                     image_sampling_spacing=2 * moving_voxel_spacing,
                     similarity_sliding_window_stride=similarity_sliding_window_stride,
-                    similarity_sliding_window_std=2 * moving_voxel_spacing,
+                    similarity_sliding_window_std=2 * moving_voxel_spacing * sliding_window_std,
                     sampling_coordinates_padding=10,
                 ),
                 reference_regularization_parameters=RegularizationParameters(
@@ -163,13 +165,13 @@ def build_config(arguments: ConfigBuildingArguments) -> RegistrationParameters:
                 reference_image_parameters=ImageParameters(
                     image_sampling_spacing=1 * reference_voxel_spacing,
                     similarity_sliding_window_stride=similarity_sliding_window_stride,
-                    similarity_sliding_window_std=1 * reference_voxel_spacing,
+                    similarity_sliding_window_std=1 * reference_voxel_spacing * sliding_window_std,
                     sampling_coordinates_padding=5,
                 ),
                 moving_image_parameters=ImageParameters(
                     image_sampling_spacing=1 * moving_voxel_spacing,
                     similarity_sliding_window_stride=similarity_sliding_window_stride,
-                    similarity_sliding_window_std=1 * moving_voxel_spacing,
+                    similarity_sliding_window_std=1 * moving_voxel_spacing * sliding_window_std,
                     sampling_coordinates_padding=5,
                 ),
                 reference_regularization_parameters=RegularizationParameters(
