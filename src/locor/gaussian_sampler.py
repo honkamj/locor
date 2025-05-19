@@ -32,7 +32,7 @@ class GaussianKernel(PiecewiseKernelDefinition):
 
     def edge_continuity_schedule(self, spatial_dim: int, device: torch_device) -> Tensor:
         return zeros(  # Due to truncating, the kernel is not continuous at the edges
-            (1, 3), device=device, dtype=torch_bool
+            (1, 2), device=device, dtype=torch_bool
         )
 
     def piece_edges(self, spatial_dim: int, dtype: torch_dtype, device: torch_device) -> Tensor:
