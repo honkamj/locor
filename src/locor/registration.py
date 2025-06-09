@@ -38,6 +38,7 @@ from .bounding_box import optimal_coordinates
 from .config_parameters import (
     AffineStageParameters,
     DenseStageParameters,
+    FeatureExtractionParameters,
     ImageParameters,
     RegistrationParameters,
 )
@@ -112,7 +113,11 @@ def _register(
         feature_extractors.append(
             FeatureExtractor(
                 n_dims=n_dims,
-                n_input_channels=2 * n_reference_channels,
+                n_input_channels=(
+                    2 * n_reference_channels
+                    if parameters.feature_extraction_parameters_reference.derivative_magnitude
+                    else n_reference_channels
+                ),
                 n_hidden_features=(
                     parameters.feature_extraction_parameters_reference.n_hidden_features
                 ),
@@ -125,7 +130,11 @@ def _register(
         feature_extractors.append(
             FeatureExtractor(
                 n_dims=n_dims,
-                n_input_channels=2 * n_moving_channels,
+                n_input_channels=(
+                    2 * n_moving_channels
+                    if parameters.feature_extraction_parameters_moving.derivative_magnitude
+                    else n_moving_channels
+                ),
                 n_hidden_features=parameters.feature_extraction_parameters_moving.n_hidden_features,
                 n_output_channels=parameters.feature_extraction_parameters_moving.n_features,
             ).to(device=device, dtype=moving.dtype)
@@ -143,6 +152,10 @@ def _register(
             parameters=parameters.affine_stage_parameters,
             device=device,
             rank=rank,
+            feature_extraction_parameters_reference=(
+                parameters.feature_extraction_parameters_reference
+            ),
+            feature_extraction_parameters_moving=(parameters.feature_extraction_parameters_moving),
         )
 
     for index, dense_stage_parameters in enumerate(parameters.dense_stage_parameters):
@@ -155,6 +168,8 @@ def _register(
             parameters=dense_stage_parameters,
             device=device,
             rank=rank,
+            feature_extraction_parameters_reference=parameters.feature_extraction_parameters_reference,
+            feature_extraction_parameters_moving=parameters.feature_extraction_parameters_moving,
         )
 
     output_deformations: list[GridComposableMapping] = []
@@ -178,6 +193,8 @@ def _register_affine(
     parameters: AffineStageParameters,
     device: torch_device,
     rank: int | None,
+    feature_extraction_parameters_reference: FeatureExtractionParameters,
+    feature_extraction_parameters_moving: FeatureExtractionParameters,
 ) -> list[SymmetricDeformationModel]:
     affine_parameters = AffineTransformationParameters(
         n_dims=len(reference.coordinate_system.spatial_shape),
@@ -208,6 +225,8 @@ def _register_affine(
         moving=moving,
         parameters=parameters,
         device=device,
+        feature_extraction_parameters_reference=feature_extraction_parameters_reference,
+        feature_extraction_parameters_moving=feature_extraction_parameters_moving,
     )
     normalizing_affine, inverse_normalizing_affine = _normalizing_affine(
         moving.coordinate_system.cast(device=device)
@@ -308,6 +327,8 @@ def _register_dense(
     parameters: DenseStageParameters,
     device: torch_device,
     rank: int | None,
+    feature_extraction_parameters_reference: FeatureExtractionParameters,
+    feature_extraction_parameters_moving: FeatureExtractionParameters,
 ) -> list[SymmetricDeformationModel]:
     deformation_coordinates = reference.coordinate_system.cast(device=device)
     deformation_sampling_coordinates = deformation_coordinates.reformat(
@@ -349,6 +370,8 @@ def _register_dense(
         moving=moving,
         parameters=parameters,
         device=device,
+        feature_extraction_parameters_reference=feature_extraction_parameters_reference,
+        feature_extraction_parameters_moving=feature_extraction_parameters_moving,
     )
     progress_bar = tqdm(range(parameters.n_iterations), position=rank)
     for _ in progress_bar:
@@ -461,6 +484,8 @@ def _initialize_registration_stage(
     moving: GridComposableMapping,
     parameters: AffineStageParameters | DenseStageParameters,
     device: torch_device,
+    feature_extraction_parameters_reference: FeatureExtractionParameters,
+    feature_extraction_parameters_moving: FeatureExtractionParameters,
 ) -> Sequence[tuple[GridComposableMapping, GridComposableMapping, CoordinateSystem]]:
     registration_inputs: list[
         tuple[GridComposableMapping, GridComposableMapping, CoordinateSystem]
@@ -478,6 +503,8 @@ def _initialize_registration_stage(
             initial_deformation=initial_deformation,
             deformation_coordinates=reference.coordinate_system,
             device=device,
+            feature_extraction_parameters_reference=feature_extraction_parameters_reference,
+            feature_extraction_parameters_moving=feature_extraction_parameters_moving,
         )
         similarity_coordinates = _similarity_sampling_coordinates(
             reference_initialized,
@@ -496,6 +523,8 @@ def _initialize_image_pair(
     initial_deformation: SymmetricDeformationModel,
     deformation_coordinates: CoordinateSystem,
     device: torch_device,
+    feature_extraction_parameters_reference: FeatureExtractionParameters,
+    feature_extraction_parameters_moving: FeatureExtractionParameters,
 ) -> tuple[GridComposableMapping, GridComposableMapping]:
     reference = reference.cast(device=device)
     moving = moving.cast(device=device)
@@ -505,11 +534,13 @@ def _initialize_image_pair(
         reference,
         sampling_spacing=_tensor(reference_parameters.image_sampling_spacing, reference.dtype),
         truncate_at_n_stds=reference_parameters.truncate_image_smoothing_at_n_stds,
+        include_derivative_magnitude=feature_extraction_parameters_reference.derivative_magnitude,
     )
     moving_smoothed = _smoothed_mapping(
         moving,
         sampling_spacing=_tensor(reference_parameters.image_sampling_spacing, reference.dtype),
         truncate_at_n_stds=reference_parameters.truncate_image_smoothing_at_n_stds,
+        include_derivative_magnitude=feature_extraction_parameters_moving.derivative_magnitude,
     )
 
     deformation_to_moving, _ = initial_deformation.build_full_deformation(deformation_coordinates)
@@ -609,6 +640,7 @@ def _smoothed_mapping(
     image: GridComposableMapping,
     sampling_spacing: Tensor,
     truncate_at_n_stds: int | float,
+    include_derivative_magnitude: bool,
 ) -> GridComposableMapping:
     voxel_size = image.coordinate_system.grid_spacing_cpu()
     smoothing_stds = 2.0 * sampling_spacing / voxel_size / 6.0
@@ -648,6 +680,8 @@ def _smoothed_mapping(
         mask=mask,
         sampler=LinearInterpolator(limit_direction=LimitDirection.average()),
     )
+    if not include_derivative_magnitude:
+        return smoothed_image
     coordinates = image.coordinate_system.reformat(
         reference=Center(),
         spatial_shape=OriginalShape() - 2,

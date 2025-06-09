@@ -74,6 +74,7 @@ class FeatureExtractionParameters:
 
     n_features: int
     n_hidden_features: Sequence[int]
+    derivative_magnitude: bool = True
 
 
 @dataclass
