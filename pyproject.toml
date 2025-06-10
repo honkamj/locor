@@ -33,4 +33,4 @@ license = {file = "LICENSE"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-"image_registration_tool" = ["py.typed"]
+"locor" = ["py.typed"]
