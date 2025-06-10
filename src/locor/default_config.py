@@ -12,6 +12,7 @@ from locor.config_parameters import (
     DenseStageParameters,
     FeatureExtractionParameters,
     ImageParameters,
+    PreprocessingParameters,
     RegistrationParameters,
     RegularizationParameters,
 )
@@ -181,4 +182,10 @@ def build_config(arguments: ConfigBuildingArguments) -> RegistrationParameters:
                 moving_regularization_parameters=None,
             ),
         ],
+        reference_preprocessing_parameters=PreprocessingParameters(
+            augment_with_derivative_magnitude=True,
+        ),
+        moving_preprocessing_parameters=PreprocessingParameters(
+            augment_with_derivative_magnitude=True,
+        ),
     )

@@ -74,7 +74,13 @@ class FeatureExtractionParameters:
 
     n_features: int
     n_hidden_features: Sequence[int]
-    derivative_magnitude: bool = True
+
+
+@dataclass
+class PreprocessingParameters:
+    """Preprocessing parameters for the images before registration."""
+
+    augment_with_derivative_magnitude: bool = True
 
 
 @dataclass
@@ -86,6 +92,9 @@ class RegistrationParameters:
 
     affine_stage_parameters: AffineStageParameters | None
     dense_stage_parameters: Sequence[DenseStageParameters]
+
+    reference_preprocessing_parameters: PreprocessingParameters
+    moving_preprocessing_parameters: PreprocessingParameters
 
 
 @dataclass

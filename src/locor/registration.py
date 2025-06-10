@@ -25,7 +25,7 @@ from composable_mapping.util import combine_optional_masks
 from torch import Tensor, cat
 from torch import device as torch_device
 from torch import dtype as torch_dtype
-from torch import float32, rand, stack, tensor
+from torch import float32, rand, stack, tensor, zeros
 from torch.cuda import set_device as set_cuda_device
 from torch.distributed import init_process_group
 from torch.multiprocessing import Pool, set_start_method
@@ -38,8 +38,8 @@ from .bounding_box import optimal_coordinates
 from .config_parameters import (
     AffineStageParameters,
     DenseStageParameters,
-    FeatureExtractionParameters,
     ImageParameters,
+    PreprocessingParameters,
     RegistrationParameters,
 )
 from .feature_extractor import FeatureExtractor
@@ -106,16 +106,18 @@ def _register(
 
     n_dims = len(reference.coordinate_system.spatial_shape)
 
-    feature_extractors: list[FeatureExtractor] = []
+    feature_extractors: list[FeatureExtractor | None] = []
     deformations: list[SymmetricDeformationModel] = []
     full_deformation_references: list[CoordinateSystem] = []
     if rank in (0, None):
         feature_extractors.append(
-            FeatureExtractor(
+            None
+            if parameters.feature_extraction_parameters_moving is None
+            else FeatureExtractor(
                 n_dims=n_dims,
                 n_input_channels=(
                     2 * n_reference_channels
-                    if parameters.feature_extraction_parameters_reference.derivative_magnitude
+                    if parameters.reference_preprocessing_parameters.augment_with_derivative_magnitude  # pylint: disable=line-too-long
                     else n_reference_channels
                 ),
                 n_hidden_features=(
@@ -128,11 +130,13 @@ def _register(
         full_deformation_references.append(reference.coordinate_system.cast(device=device))
     if rank in (1, None):
         feature_extractors.append(
-            FeatureExtractor(
+            None
+            if parameters.feature_extraction_parameters_moving is None
+            else FeatureExtractor(
                 n_dims=n_dims,
                 n_input_channels=(
                     2 * n_moving_channels
-                    if parameters.feature_extraction_parameters_moving.derivative_magnitude
+                    if parameters.reference_preprocessing_parameters.augment_with_derivative_magnitude  # pylint: disable=line-too-long
                     else n_moving_channels
                 ),
                 n_hidden_features=parameters.feature_extraction_parameters_moving.n_hidden_features,
@@ -152,10 +156,8 @@ def _register(
             parameters=parameters.affine_stage_parameters,
             device=device,
             rank=rank,
-            feature_extraction_parameters_reference=(
-                parameters.feature_extraction_parameters_reference
-            ),
-            feature_extraction_parameters_moving=(parameters.feature_extraction_parameters_moving),
+            preprocessing_parameters_reference=parameters.reference_preprocessing_parameters,
+            preprocessing_parameters_moving=parameters.moving_preprocessing_parameters,
         )
 
     for index, dense_stage_parameters in enumerate(parameters.dense_stage_parameters):
@@ -168,8 +170,8 @@ def _register(
             parameters=dense_stage_parameters,
             device=device,
             rank=rank,
-            feature_extraction_parameters_reference=parameters.feature_extraction_parameters_reference,
-            feature_extraction_parameters_moving=parameters.feature_extraction_parameters_moving,
+            preprocessing_parameters_reference=parameters.reference_preprocessing_parameters,
+            preprocessing_parameters_moving=parameters.moving_preprocessing_parameters,
         )
 
     output_deformations: list[GridComposableMapping] = []
@@ -187,14 +189,14 @@ def _register(
 
 def _register_affine(
     initial_deformations: Sequence[SymmetricDeformationModel],
-    feature_extractors: Sequence[FeatureExtractor],
+    feature_extractors: Sequence[FeatureExtractor | None],
     reference: GridComposableMapping,
     moving: GridComposableMapping,
     parameters: AffineStageParameters,
     device: torch_device,
     rank: int | None,
-    feature_extraction_parameters_reference: FeatureExtractionParameters,
-    feature_extraction_parameters_moving: FeatureExtractionParameters,
+    preprocessing_parameters_reference: PreprocessingParameters,
+    preprocessing_parameters_moving: PreprocessingParameters,
 ) -> list[SymmetricDeformationModel]:
     affine_parameters = AffineTransformationParameters(
         n_dims=len(reference.coordinate_system.spatial_shape),
@@ -213,20 +215,21 @@ def _register_affine(
     )
     feature_optimizers: list[Adam] = []
     for feature_extractor in feature_extractors:
-        feature_optimizers.append(
-            Adam(
-                feature_extractor.parameters(),
-                lr=parameters.feature_learning_rate,
+        if feature_extractor is not None:
+            feature_optimizers.append(
+                Adam(
+                    feature_extractor.parameters(),
+                    lr=parameters.feature_learning_rate,
+                )
             )
-        )
     registration_inputs = _initialize_registration_stage(
         initial_deformations=initial_deformations,
         reference=reference,
         moving=moving,
         parameters=parameters,
         device=device,
-        feature_extraction_parameters_reference=feature_extraction_parameters_reference,
-        feature_extraction_parameters_moving=feature_extraction_parameters_moving,
+        preprocessing_parameters_reference=preprocessing_parameters_reference,
+        preprocessing_parameters_moving=preprocessing_parameters_moving,
     )
     normalizing_affine, inverse_normalizing_affine = _normalizing_affine(
         moving.coordinate_system.cast(device=device)
@@ -239,52 +242,58 @@ def _register_affine(
                 feature_optimizer.zero_grad()
             similarity_losses = []
             for (
-                (reference_initialized, moving_initialized, similarity_coordinates),
+                registration_input,
                 feature_extractor,
                 initial_deformation,
             ) in zip(registration_inputs, feature_extractors, initial_deformations):
-                reference_image_parameters = (
-                    parameters.reference_image_parameters,
-                    parameters.moving_image_parameters,
-                )[initial_deformation.inverse]
-                updated_deformation = initial_deformation.set_affine(
-                    affine_parameters=affine_parameters_distributed(),
-                    affine_transformation_type=parameters.transformation_type,
-                    normalizing_affine=normalizing_affine,
-                    normalizing_affine_inverse=inverse_normalizing_affine,
-                )
-                registered_moving = (moving_initialized @ updated_deformation.affine).resample_to(
-                    reference_initialized
-                )
-                registered_moving_values, registered_moving_mask = (
-                    registered_moving.sample().generate()
-                )
-                features_moving = feature_extractor(registered_moving_values)
-                similarity_sampler = _similarity_sampler(
-                    reference_initialized,
-                    reference_image_parameters,
-                )
-                # We disable the cache since the similarity sampler differs per iteration.
-                with no_sampling_cache():
-                    similarity_loss = local_least_squares_error(
-                        samplable_volume(
-                            features_moving,
-                            mask=registered_moving_mask,
-                            coordinate_system=reference_initialized.coordinate_system,
-                        ),
+                if registration_input is not None and feature_extractor is not None:
+                    reference_image_parameters = (
+                        parameters.reference_image_parameters,
+                        parameters.moving_image_parameters,
+                    )[initial_deformation.inverse]
+                    updated_deformation = initial_deformation.set_affine(
+                        affine_parameters=affine_parameters_distributed(),
+                        affine_transformation_type=parameters.transformation_type,
+                        normalizing_affine=normalizing_affine,
+                        normalizing_affine_inverse=inverse_normalizing_affine,
+                    )
+                    (reference_initialized, moving_initialized, similarity_coordinates) = (
+                        registration_input
+                    )
+                    registered_moving = (
+                        moving_initialized @ updated_deformation.affine
+                    ).resample_to(reference_initialized)
+                    registered_moving_values, registered_moving_mask = (
+                        registered_moving.sample().generate()
+                    )
+                    features_moving = feature_extractor(registered_moving_values)
+                    similarity_sampler = _similarity_sampler(
                         reference_initialized,
-                        sampler=similarity_sampler,
-                        coordinates=similarity_coordinates,
-                        regularization=reference_image_parameters.matrix_solve_epsilon,
-                        eps=reference_image_parameters.similarity_logarithm_epsilon,
-                    ).mean()
-                similarity_losses.append(similarity_loss)
-            loss = stack(similarity_losses).mean()
-            loss.backward()
-            optimizer.step()
-            for feature_optimizer in feature_optimizers:
-                feature_optimizer.step()
-            progress_bar.set_description(f"Loss{process_rank_postfix}: {loss.item():.4e}")
+                        reference_image_parameters,
+                    )
+                    # We disable the cache since the similarity sampler differs per iteration.
+                    with no_sampling_cache():
+                        similarity_losses.append(
+                            local_least_squares_error(
+                                samplable_volume(
+                                    features_moving,
+                                    mask=registered_moving_mask,
+                                    coordinate_system=reference_initialized.coordinate_system,
+                                ),
+                                reference_initialized,
+                                sampler=similarity_sampler,
+                                coordinates=similarity_coordinates,
+                                regularization=reference_image_parameters.matrix_solve_epsilon,
+                                eps=reference_image_parameters.similarity_logarithm_epsilon,
+                            ).mean()
+                        )
+            if similarity_losses:
+                loss = stack(similarity_losses).sum() / len(initial_deformations)
+                loss.backward()
+                optimizer.step()
+                for feature_optimizer in feature_optimizers:
+                    feature_optimizer.step()
+                progress_bar.set_description(f"Loss{process_rank_postfix}: {loss.item():.4e}")
     clear_sampling_cache()
     return [
         initial_deformation.set_affine(
@@ -321,14 +330,14 @@ def _normalizing_affine(coordinates: CoordinateSystem) -> tuple[Affine, Affine]:
 
 def _register_dense(
     initial_deformations: Sequence[SymmetricDeformationModel],
-    feature_extractors: Sequence[FeatureExtractor],
+    feature_extractors: Sequence[FeatureExtractor | None],
     reference: GridComposableMapping,
     moving: GridComposableMapping,
     parameters: DenseStageParameters,
     device: torch_device,
     rank: int | None,
-    feature_extraction_parameters_reference: FeatureExtractionParameters,
-    feature_extraction_parameters_moving: FeatureExtractionParameters,
+    preprocessing_parameters_reference: PreprocessingParameters,
+    preprocessing_parameters_moving: PreprocessingParameters,
 ) -> list[SymmetricDeformationModel]:
     deformation_coordinates = reference.coordinate_system.cast(device=device)
     deformation_sampling_coordinates = deformation_coordinates.reformat(
@@ -358,20 +367,21 @@ def _register_dense(
     )
     feature_optimizers: list[Adam] = []
     for feature_extractor in feature_extractors:
-        feature_optimizers.append(
-            Adam(
-                feature_extractor.parameters(),
-                lr=parameters.feature_learning_rate,
+        if feature_extractor is not None:
+            feature_optimizers.append(
+                Adam(
+                    feature_extractor.parameters(),
+                    lr=parameters.feature_learning_rate,
+                )
             )
-        )
     registration_inputs = _initialize_registration_stage(
         initial_deformations=initial_deformations,
         reference=reference,
         moving=moving,
         parameters=parameters,
         device=device,
-        feature_extraction_parameters_reference=feature_extraction_parameters_reference,
-        feature_extraction_parameters_moving=feature_extraction_parameters_moving,
+        preprocessing_parameters_reference=preprocessing_parameters_reference,
+        preprocessing_parameters_moving=preprocessing_parameters_moving,
     )
     progress_bar = tqdm(range(parameters.n_iterations), position=rank)
     for _ in progress_bar:
@@ -390,76 +400,88 @@ def _register_dense(
             similarity_losses = []
             regularization_losses = []
             for (
-                (reference_initialized, moving_initialized, similarity_coordinates),
+                registration_input,
                 feature_extractor,
                 initial_deformation,
             ) in reversed(list(zip(registration_inputs, feature_extractors, initial_deformations))):
-                reference_image_parameters = (
-                    parameters.reference_image_parameters,
-                    parameters.moving_image_parameters,
-                )[initial_deformation.inverse]
                 reference_regularization_parameters = (
                     parameters.reference_regularization_parameters,
                     parameters.moving_regularization_parameters,
                 )[initial_deformation.inverse]
-                updated_deformation = initial_deformation.update(
-                    update_svf=update_svf,
-                    n_scalings_and_squarings=parameters.n_scalings_and_squarings,
-                )
-                deformation_to_moving, deformation_to_moving_without_affine = (
-                    updated_deformation.build_full_deformation(deformation_sampling_coordinates)
-                )
-                registered_moving = (moving_initialized @ deformation_to_moving).resample_to(
-                    reference_initialized
-                )
-                registered_moving_values, registered_moving_mask = (
-                    registered_moving.sample().generate()
-                )
-                features_moving = feature_extractor(registered_moving_values)
-                similarity_sampler = _similarity_sampler(
-                    reference_initialized,
-                    reference_image_parameters,
-                )
-                # We disable the cache since the similarity sampler differs per iteration.
-                with no_sampling_cache():
-                    similarity = local_least_squares_error(
-                        samplable_volume(
-                            features_moving,
-                            mask=registered_moving_mask,
-                            coordinate_system=reference_initialized.coordinate_system,
-                        ),
-                        reference_initialized,
-                        sampler=similarity_sampler,
-                        coordinates=similarity_coordinates,
-                        regularization=reference_image_parameters.matrix_solve_epsilon,
-                        eps=reference_image_parameters.similarity_logarithm_epsilon,
-                    ).mean()
-
-                if reference_regularization_parameters is not None:
-                    regularity = (
-                        reference_regularization_parameters.weight
-                        * reference_regularization_parameters.loss(
-                            deformation_to_moving_without_affine
-                        ).mean()
+                if (
+                    registration_input is not None and feature_extractor is not None
+                ) or reference_regularization_parameters is not None:
+                    updated_deformation = initial_deformation.update(
+                        update_svf=update_svf,
+                        n_scalings_and_squarings=parameters.n_scalings_and_squarings,
                     )
-                else:
-                    regularity = tensor(0.0, device=device, dtype=similarity.dtype)
+                    deformation_to_moving, deformation_to_moving_without_affine = (
+                        updated_deformation.build_full_deformation(deformation_sampling_coordinates)
+                    )
+                    if reference_regularization_parameters is not None:
+                        regularization_losses.append(
+                            reference_regularization_parameters.weight
+                            * reference_regularization_parameters.loss(
+                                deformation_to_moving_without_affine
+                            ).mean()
+                        )
+                    if registration_input is not None and feature_extractor is not None:
+                        reference_image_parameters = (
+                            parameters.reference_image_parameters,
+                            parameters.moving_image_parameters,
+                        )[initial_deformation.inverse]
+                        (reference_initialized, moving_initialized, similarity_coordinates) = (
+                            registration_input
+                        )
+                        registered_moving = (
+                            moving_initialized @ deformation_to_moving
+                        ).resample_to(reference_initialized)
+                        registered_moving_values, registered_moving_mask = (
+                            registered_moving.sample().generate()
+                        )
+                        features_moving = feature_extractor(registered_moving_values)
+                        similarity_sampler = _similarity_sampler(
+                            reference_initialized,
+                            reference_image_parameters,
+                        )
+                        # We disable the cache since the similarity sampler differs per iteration.
+                        with no_sampling_cache():
+                            similarity_losses.append(
+                                local_least_squares_error(
+                                    samplable_volume(
+                                        features_moving,
+                                        mask=registered_moving_mask,
+                                        coordinate_system=reference_initialized.coordinate_system,
+                                    ),
+                                    reference_initialized,
+                                    sampler=similarity_sampler,
+                                    coordinates=similarity_coordinates,
+                                    regularization=reference_image_parameters.matrix_solve_epsilon,
+                                    eps=reference_image_parameters.similarity_logarithm_epsilon,
+                                ).mean()
+                            )
+            if similarity_losses or regularization_losses:
+                mean_similarity_loss = (
+                    stack(similarity_losses).sum() / len(initial_deformations)
+                    if similarity_losses
+                    else zeros(tuple(), device=device, dtype=reference.dtype)
+                )
+                mean_regularization_loss = (
+                    stack(regularization_losses).sum() / len(initial_deformations)
+                    if regularization_losses
+                    else zeros(tuple(), device=device, dtype=reference.dtype)
+                )
+                loss = mean_similarity_loss + mean_regularization_loss
 
-                similarity_losses.append(similarity)
-                regularization_losses.append(regularity)
-            mean_similarity_loss = stack(similarity_losses).mean()
-            mean_regularization_loss = stack(regularization_losses).mean()
-            loss = mean_similarity_loss + mean_regularization_loss
-
-            loss.backward()
-            optimizer.step()
-            for feature_optimizer in feature_optimizers:
-                feature_optimizer.step()
-            progress_bar.set_description(
-                f"Loss{process_rank_postfix}: {loss.item():.4e} "
-                f"(sim: {mean_similarity_loss.item():.4e}, "
-                f"reg: {float(mean_regularization_loss):.4e})"
-            )
+                loss.backward()
+                optimizer.step()
+                for feature_optimizer in feature_optimizers:
+                    feature_optimizer.step()
+                progress_bar.set_description(
+                    f"Loss{process_rank_postfix}: {loss.item():.4e} "
+                    f"(sim: {mean_similarity_loss.item():.4e}, "
+                    f"reg: {float(mean_regularization_loss):.4e})"
+                )
     final_update_svf = samplable_volume(
         spline_parameters.transformation_parameters.data,
         coordinate_system=spline_svf_coordinates,
@@ -484,11 +506,11 @@ def _initialize_registration_stage(
     moving: GridComposableMapping,
     parameters: AffineStageParameters | DenseStageParameters,
     device: torch_device,
-    feature_extraction_parameters_reference: FeatureExtractionParameters,
-    feature_extraction_parameters_moving: FeatureExtractionParameters,
-) -> Sequence[tuple[GridComposableMapping, GridComposableMapping, CoordinateSystem]]:
+    preprocessing_parameters_reference: PreprocessingParameters,
+    preprocessing_parameters_moving: PreprocessingParameters,
+) -> Sequence[tuple[GridComposableMapping, GridComposableMapping, CoordinateSystem] | None]:
     registration_inputs: list[
-        tuple[GridComposableMapping, GridComposableMapping, CoordinateSystem]
+        tuple[GridComposableMapping, GridComposableMapping, CoordinateSystem] | None
     ] = []
     for initial_deformation in initial_deformations:
         reference_parameters = (
@@ -496,23 +518,26 @@ def _initialize_registration_stage(
             if not initial_deformation.inverse
             else parameters.moving_image_parameters
         )
-        reference_initialized, moving_initialized = _initialize_image_pair(
-            reference=reference if not initial_deformation.inverse else moving,
-            moving=moving if not initial_deformation.inverse else reference,
-            reference_parameters=reference_parameters,
-            initial_deformation=initial_deformation,
-            deformation_coordinates=reference.coordinate_system,
-            device=device,
-            feature_extraction_parameters_reference=feature_extraction_parameters_reference,
-            feature_extraction_parameters_moving=feature_extraction_parameters_moving,
-        )
-        similarity_coordinates = _similarity_sampling_coordinates(
-            reference_initialized,
-            reference_parameters,
-        )
-        registration_inputs.append(
-            (reference_initialized, moving_initialized, similarity_coordinates)
-        )
+        if reference_parameters is None:
+            registration_inputs.append(None)
+        else:
+            reference_initialized, moving_initialized = _initialize_image_pair(
+                reference=reference if not initial_deformation.inverse else moving,
+                moving=moving if not initial_deformation.inverse else reference,
+                reference_parameters=reference_parameters,
+                initial_deformation=initial_deformation,
+                deformation_coordinates=reference.coordinate_system,
+                device=device,
+                preprocessing_parameters_reference=preprocessing_parameters_reference,
+                preprocessing_parameters_moving=preprocessing_parameters_moving,
+            )
+            similarity_coordinates = _similarity_sampling_coordinates(
+                reference_initialized,
+                reference_parameters,
+            )
+            registration_inputs.append(
+                (reference_initialized, moving_initialized, similarity_coordinates)
+            )
     return registration_inputs
 
 
@@ -523,24 +548,24 @@ def _initialize_image_pair(
     initial_deformation: SymmetricDeformationModel,
     deformation_coordinates: CoordinateSystem,
     device: torch_device,
-    feature_extraction_parameters_reference: FeatureExtractionParameters,
-    feature_extraction_parameters_moving: FeatureExtractionParameters,
+    preprocessing_parameters_reference: PreprocessingParameters,
+    preprocessing_parameters_moving: PreprocessingParameters,
 ) -> tuple[GridComposableMapping, GridComposableMapping]:
     reference = reference.cast(device=device)
     moving = moving.cast(device=device)
     deformation_coordinates = deformation_coordinates.cast(device=device)
 
-    reference_smoothed = _smoothed_mapping(
+    reference_smoothed = _preprocess_mapping(
         reference,
         sampling_spacing=_tensor(reference_parameters.image_sampling_spacing, reference.dtype),
         truncate_at_n_stds=reference_parameters.truncate_image_smoothing_at_n_stds,
-        include_derivative_magnitude=feature_extraction_parameters_reference.derivative_magnitude,
+        preprocessing_parameters=preprocessing_parameters_reference,
     )
-    moving_smoothed = _smoothed_mapping(
+    moving_smoothed = _preprocess_mapping(
         moving,
         sampling_spacing=_tensor(reference_parameters.image_sampling_spacing, reference.dtype),
         truncate_at_n_stds=reference_parameters.truncate_image_smoothing_at_n_stds,
-        include_derivative_magnitude=feature_extraction_parameters_moving.derivative_magnitude,
+        preprocessing_parameters=preprocessing_parameters_moving,
     )
 
     deformation_to_moving, _ = initial_deformation.build_full_deformation(deformation_coordinates)
@@ -636,11 +661,11 @@ def _similarity_sampler(
     )
 
 
-def _smoothed_mapping(
+def _preprocess_mapping(
     image: GridComposableMapping,
     sampling_spacing: Tensor,
     truncate_at_n_stds: int | float,
-    include_derivative_magnitude: bool,
+    preprocessing_parameters: PreprocessingParameters,
 ) -> GridComposableMapping:
     voxel_size = image.coordinate_system.grid_spacing_cpu()
     smoothing_stds = 2.0 * sampling_spacing / voxel_size / 6.0
@@ -680,7 +705,7 @@ def _smoothed_mapping(
         mask=mask,
         sampler=LinearInterpolator(limit_direction=LimitDirection.average()),
     )
-    if not include_derivative_magnitude:
+    if not preprocessing_parameters.augment_with_derivative_magnitude:
         return smoothed_image
     coordinates = image.coordinate_system.reformat(
         reference=Center(),
