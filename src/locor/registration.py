@@ -116,12 +116,12 @@ def _register(
             else FeatureExtractor(
                 n_dims=n_dims,
                 n_input_channels=(
-                    2 * n_reference_channels
-                    if parameters.reference_preprocessing_parameters.augment_with_derivative_magnitude  # pylint: disable=line-too-long
-                    else n_reference_channels
+                    2 * n_moving_channels
+                    if parameters.moving_preprocessing_parameters.augment_with_derivative_magnitude  # pylint: disable=line-too-long
+                    else n_moving_channels
                 ),
                 n_hidden_features=(
-                    parameters.feature_extraction_parameters_reference.n_hidden_features
+                    parameters.feature_extraction_parameters_moving.n_hidden_features
                 ),
                 n_output_channels=parameters.feature_extraction_parameters_moving.n_features,
             ).to(device=device, dtype=reference.dtype)
@@ -131,16 +131,16 @@ def _register(
     if rank in (1, None):
         feature_extractors.append(
             None
-            if parameters.feature_extraction_parameters_moving is None
+            if parameters.feature_extraction_parameters_reference is None
             else FeatureExtractor(
                 n_dims=n_dims,
                 n_input_channels=(
-                    2 * n_moving_channels
+                    2 * n_reference_channels
                     if parameters.reference_preprocessing_parameters.augment_with_derivative_magnitude  # pylint: disable=line-too-long
-                    else n_moving_channels
+                    else n_reference_channels
                 ),
-                n_hidden_features=parameters.feature_extraction_parameters_moving.n_hidden_features,
-                n_output_channels=parameters.feature_extraction_parameters_moving.n_features,
+                n_hidden_features=parameters.feature_extraction_parameters_reference.n_hidden_features,  # pylint: disable=line-too-long
+                n_output_channels=parameters.feature_extraction_parameters_reference.n_features,
             ).to(device=device, dtype=moving.dtype)
         )
         deformations.append(SymmetricDeformationModel(inverse=True))
@@ -246,11 +246,15 @@ def _register_affine(
                 feature_extractor,
                 initial_deformation,
             ) in zip(registration_inputs, feature_extractors, initial_deformations):
-                if registration_input is not None and feature_extractor is not None:
-                    reference_image_parameters = (
-                        parameters.reference_image_parameters,
-                        parameters.moving_image_parameters,
-                    )[initial_deformation.inverse]
+                reference_image_parameters = (
+                    parameters.reference_image_parameters,
+                    parameters.moving_image_parameters,
+                )[initial_deformation.inverse]
+                if (
+                    registration_input is not None
+                    and feature_extractor is not None
+                    and reference_image_parameters is not None
+                ):
                     updated_deformation = initial_deformation.set_affine(
                         affine_parameters=affine_parameters_distributed(),
                         affine_transformation_type=parameters.transformation_type,
@@ -425,11 +429,15 @@ def _register_dense(
                                 deformation_to_moving_without_affine
                             ).mean()
                         )
-                    if registration_input is not None and feature_extractor is not None:
-                        reference_image_parameters = (
-                            parameters.reference_image_parameters,
-                            parameters.moving_image_parameters,
-                        )[initial_deformation.inverse]
+                    reference_image_parameters = (
+                        parameters.reference_image_parameters,
+                        parameters.moving_image_parameters,
+                    )[initial_deformation.inverse]
+                    if (
+                        registration_input is not None
+                        and feature_extractor is not None
+                        and reference_image_parameters is not None
+                    ):
                         (reference_initialized, moving_initialized, similarity_coordinates) = (
                             registration_input
                         )

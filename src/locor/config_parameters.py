@@ -42,8 +42,8 @@ class AffineStageParameters:
     feature_learning_rate: int | float
     transformation_learning_rate: int | float
 
-    reference_image_parameters: ImageParameters
-    moving_image_parameters: ImageParameters
+    reference_image_parameters: ImageParameters | None
+    moving_image_parameters: ImageParameters | None
 
     transformation_type: AffineTransformationTypeDefinition
 
@@ -59,8 +59,8 @@ class DenseStageParameters:
 
     spline_grid_spacing: Sequence[int | float] | Tensor
 
-    reference_image_parameters: ImageParameters
-    moving_image_parameters: ImageParameters
+    reference_image_parameters: ImageParameters | None
+    moving_image_parameters: ImageParameters | None
 
     reference_regularization_parameters: RegularizationParameters | None
     moving_regularization_parameters: RegularizationParameters | None
@@ -87,8 +87,8 @@ class PreprocessingParameters:
 class RegistrationParameters:
     """Configuration parameters for the image registration tool."""
 
-    feature_extraction_parameters_reference: FeatureExtractionParameters
-    feature_extraction_parameters_moving: FeatureExtractionParameters
+    feature_extraction_parameters_reference: FeatureExtractionParameters | None
+    feature_extraction_parameters_moving: FeatureExtractionParameters | None
 
     affine_stage_parameters: AffineStageParameters | None
     dense_stage_parameters: Sequence[DenseStageParameters]
