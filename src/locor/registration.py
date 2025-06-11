@@ -749,10 +749,14 @@ def _preprocess_mapping(
 def _normalize(
     image: GridComposableMapping,
 ) -> SamplableVolume:
-    values, mask = image.sample().generate(generate_missing_mask=True, cast_mask=False)
-    valid_voxels = values[0][mask[0].broadcast_to(values.shape[1:])]
-    image_min = valid_voxels.amin()
-    image_max = valid_voxels.amax()
+    values, mask = image.sample().generate(generate_missing_mask=False, cast_mask=False)
+    if mask is None:
+        image_min = float(values.amin())
+        image_max = float(values.amax())
+    else:
+        valid_voxels = values[mask.broadcast_to(values.shape)]
+        image_min = float(valid_voxels.amin())
+        image_max = float(valid_voxels.amax())
     values = values.clamp(min=image_min, max=image_max)
     values = (values - image_min) / (image_max - image_min)
     return samplable_volume(
