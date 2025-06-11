@@ -60,6 +60,10 @@ def register(
     Coordinate mapping is returned in both directions but the non-affine
     component is learned in the coordinates of the reference image.
     """
+    if parameters.reference_preprocessing_parameters.channels_as_batch_dimensions:
+        reference = _move_channels_to_batch_dims(reference)
+    if parameters.moving_preprocessing_parameters.channels_as_batch_dimensions:
+        moving = _move_channels_to_batch_dims(moving)
     if devices is None or not devices:
         devices = [reference.device]
     if len(devices) == 1:
@@ -76,6 +80,7 @@ def register(
                     ],
                 )
             )
+
     raise NotImplementedError(
         "Distributed registration is not implemented for more than two devices."
     )
@@ -762,3 +767,14 @@ def _tensor(item: Tensor | Sequence[float | int], dtype: torch_dtype) -> Tensor:
     if isinstance(item, Tensor):
         return item
     return tensor(item, device=torch_device("cpu"), dtype=dtype)
+
+
+def _move_channels_to_batch_dims(mapping: GridComposableMapping) -> GridComposableMapping:
+    values, mask = mapping.sample().generate()
+    values = values.view(-1, 1, *values.shape[2:])
+    mapping = samplable_volume(
+        values,
+        mask=None if mask is None else mask.broadcast_to((values.shape[0], *mask.shape[1:])),
+        coordinate_system=mapping.coordinate_system,
+    )
+    return mapping

@@ -81,6 +81,7 @@ class PreprocessingParameters:
     """Preprocessing parameters for the images before registration."""
 
     augment_with_derivative_magnitude: bool = True
+    channels_as_batch_dimensions: bool = False
 
 
 @dataclass
