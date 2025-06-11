@@ -750,7 +750,6 @@ def _normalize(
     image: GridComposableMapping,
 ) -> SamplableVolume:
     values, mask = image.sample().generate(generate_missing_mask=True, cast_mask=False)
-    assert values.size(0) == 1
     valid_voxels = values[0][mask[0].broadcast_to(values.shape[1:])]
     image_min = valid_voxels.amin()
     image_max = valid_voxels.amax()
