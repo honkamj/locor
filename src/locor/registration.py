@@ -716,7 +716,7 @@ def _preprocess_mapping(
         smoothed_values,
         coordinate_system=image.coordinate_system,
         mask=mask,
-        sampler=LinearInterpolator(limit_direction=LimitDirection.average()),
+        sampler=LinearInterpolator(),
     )
     if not preprocessing_parameters.augment_with_derivative_magnitude:
         return smoothed_image
@@ -727,7 +727,9 @@ def _preprocess_mapping(
     derivatives = stack_mappable_tensors(
         *(
             smoothed_image.modify_sampler(
-                sampler=LinearInterpolator().derivative(spatial_dim=spatial_dim)
+                sampler=LinearInterpolator(limit_direction=LimitDirection.average()).derivative(
+                    spatial_dim=spatial_dim
+                )
             ).sample_to(coordinates)
             for spatial_dim in range(len(smoothing_stds))
         ),
